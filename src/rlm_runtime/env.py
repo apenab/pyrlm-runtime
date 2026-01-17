@@ -9,6 +9,8 @@ import textwrap
 from contextlib import redirect_stdout
 from typing import Any, Dict
 
+from .context import Context
+
 
 @dataclass(frozen=True)
 class ExecResult:
@@ -30,12 +32,13 @@ class PythonREPL:
         self._globals: Dict[str, Any] = {}
 
         modules = allowed_modules or {
-            "re": re,
+            "re": _RegexProxy(re),
             "math": math,
             "json": json,
             "textwrap": textwrap,
         }
         builtins = allowed_builtins or self._default_builtins()
+        builtins["__import__"] = self._safe_import(modules)
 
         self._globals.update(modules)
         self._globals["__builtins__"] = builtins
@@ -68,6 +71,16 @@ class PythonREPL:
             "RuntimeError": RuntimeError,
         }
 
+    def _safe_import(self, modules: Dict[str, Any]) -> Any:
+        allowed = dict(modules)
+
+        def _import(name: str, globals: Dict[str, Any] | None = None, locals: Dict[str, Any] | None = None, fromlist: tuple | list = (), level: int = 0) -> Any:  # noqa: A002
+            if name in allowed:
+                return allowed[name]
+            raise ImportError(f"import of '{name}' is not allowed")
+
+        return _import
+
     def exec(self, code: str) -> ExecResult:
         buffer = io.StringIO()
         error: str | None = None
@@ -99,3 +112,40 @@ class PythonREPL:
         if len(text) <= self._stdout_limit:
             return text
         return text[: self._stdout_limit] + "...<truncated>"
+
+
+def _coerce_text(value: Any) -> str:
+    if isinstance(value, Context):
+        return value.text
+    if isinstance(value, list):
+        if value and isinstance(value[0], tuple) and len(value[0]) >= 3:
+            return "\n".join(str(item[2]) for item in value)
+        return "\n".join(str(item) for item in value)
+    if isinstance(value, tuple):
+        if value and isinstance(value[0], str):
+            return "\n".join(value)
+        return str(value)
+    return str(value)
+
+
+class _RegexProxy:
+    def __init__(self, module: Any) -> None:
+        self._module = module
+
+    def search(self, pattern: str, string: Any, flags: int = 0) -> Any:
+        return self._module.search(pattern, _coerce_text(string), flags)
+
+    def match(self, pattern: str, string: Any, flags: int = 0) -> Any:
+        return self._module.match(pattern, _coerce_text(string), flags)
+
+    def findall(self, pattern: str, string: Any, flags: int = 0) -> Any:
+        return self._module.findall(pattern, _coerce_text(string), flags)
+
+    def finditer(self, pattern: str, string: Any, flags: int = 0) -> Any:
+        return self._module.finditer(pattern, _coerce_text(string), flags)
+
+    def sub(self, pattern: str, repl: Any, string: Any, count: int = 0, flags: int = 0) -> Any:
+        return self._module.sub(pattern, repl, _coerce_text(string), count, flags)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._module, name)

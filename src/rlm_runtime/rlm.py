@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import hashlib
 import logging
@@ -9,12 +10,27 @@ from .cache import CacheRecord, FileCache
 from .context import Context
 from .env import PythonREPL
 from .policy import Policy
-from .prompts import BASE_SYSTEM_PROMPT, SUBCALL_SYSTEM_PROMPT, build_root_user_message
+from .prompts import (
+    BASE_SYSTEM_PROMPT,
+    SUBCALL_SYSTEM_PROMPT,
+    RECURSIVE_SUBCALL_SYSTEM_PROMPT,
+    build_root_user_message,
+)
 from .trace import Trace, TraceStep
 
 
 @dataclass
 class RLM:
+    """Recursive Language Model runtime.
+
+    Key parameters for subcall configuration (paper-aligned):
+    - subcall_adapter: Use a different (often smaller/cheaper) model for subcalls.
+      If None, uses the same adapter as the root.
+    - recursive_subcalls: If True, subcalls themselves run a mini-RLM loop instead
+      of a single LLM call. This enables true recursive processing as in the paper.
+    - max_recursion_depth: Maximum depth for recursive subcalls (default 2).
+    """
+
     adapter: ModelAdapter
     policy: Policy | None = None
     cache: FileCache | None = None
@@ -30,6 +46,21 @@ class RLM:
     fallback_code: str | None = None
     repl_error_limit: int | None = None
     subcall_guard_steps: int | None = None
+    fallback_guard_steps: int | None = None
+    # Paper-aligned: support different adapter for subcalls
+    subcall_adapter: ModelAdapter | None = None
+    # Paper-aligned: enable recursive subcalls (subcall runs a mini-RLM)
+    recursive_subcalls: bool = False
+    # Maximum recursion depth for nested RLM calls
+    max_recursion_depth: int = 2
+    # System prompt for recursive subcalls
+    recursive_subcall_system_prompt: str = RECURSIVE_SUBCALL_SYSTEM_PROMPT
+    # Max steps for recursive subcall RLMs (should be small)
+    recursive_subcall_max_steps: int = 3
+    # Paper-aligned: enable parallel subcalls for batch operations
+    parallel_subcalls: bool = False
+    # Max concurrent subcalls when parallel_subcalls=True
+    max_concurrent_subcalls: int = 10
 
     def run(self, query: str, context: Context) -> tuple[str, Trace]:
         logger = self.logger or logging.getLogger("rlm_runtime")
@@ -61,6 +92,9 @@ class RLM:
             step_id += 1
             return step_id
 
+        # Select adapter for subcalls (paper-aligned: can use different/cheaper model)
+        effective_subcall_adapter = self.subcall_adapter or self.adapter
+
         def subcall(
             text: str,
             *,
@@ -70,7 +104,12 @@ class RLM:
         ) -> str:
             nonlocal subcall_made
             policy.check_subcall(depth)
-            cache_key = _cache_key(text=text, model=model, max_tokens=max_tokens)
+
+            # Include recursive flag in cache key for correct cache separation
+            recursive_flag = self.recursive_subcalls and depth < self.max_recursion_depth
+            cache_key = _cache_key(
+                text=text, model=model, max_tokens=max_tokens, recursive=recursive_flag
+            )
             input_hash = _hash_text(text)
             cached = cache.get(cache_key)
             if cached:
@@ -94,11 +133,75 @@ class RLM:
                 )
                 return cached.text
 
+            # Paper-aligned: recursive subcalls run a mini-RLM instead of single LLM call
+            if self.recursive_subcalls and depth < self.max_recursion_depth:
+                result_text, sub_trace = _run_recursive_subcall(
+                    text=text,
+                    adapter=effective_subcall_adapter,
+                    system_prompt=self.recursive_subcall_system_prompt,
+                    max_steps=self.recursive_subcall_max_steps,
+                    max_tokens=max_tokens,
+                    depth=depth,
+                    logger=logger,
+                )
+                subcall_made = True
+                # Aggregate usage from sub-trace
+                total_tokens = sum(
+                    s.usage.total_tokens for s in sub_trace.steps if s.usage
+                )
+                from .adapters.base import Usage
+                aggregated_usage = Usage(
+                    prompt_tokens=0, completion_tokens=0, total_tokens=total_tokens
+                )
+                policy.add_subcall_tokens(total_tokens)
+                cache.set(cache_key, CacheRecord(text=result_text, usage=aggregated_usage))
+                trace.add(
+                    TraceStep(
+                        step_id=next_step_id(),
+                        kind="recursive_subcall",
+                        depth=depth,
+                        prompt_summary=_truncate(text, 240),
+                        usage=aggregated_usage,
+                        cache_hit=False,
+                        input_hash=input_hash,
+                        output_hash=_hash_text(result_text),
+                        cache_key=cache_key,
+                    )
+                )
+                # Merge sub-trace steps into main trace for visibility
+                kind_map = {
+                    "root_call": "sub_root_call",
+                    "repl_exec": "sub_repl_exec",
+                    "subcall": "sub_subcall",
+                }
+                for sub_step in sub_trace.steps:
+                    # Map the sub-step kind to the appropriate sub_ variant
+                    sub_kind = kind_map.get(sub_step.kind, sub_step.kind)
+                    sub_step_copy = TraceStep(
+                        step_id=next_step_id(),
+                        kind=sub_kind,  # type: ignore[arg-type]
+                        depth=depth + (sub_step.depth or 0),
+                        prompt_summary=sub_step.prompt_summary,
+                        code=sub_step.code,
+                        stdout=sub_step.stdout,
+                        error=sub_step.error,
+                        usage=sub_step.usage,
+                        cache_hit=sub_step.cache_hit,
+                        input_hash=sub_step.input_hash,
+                        output_hash=sub_step.output_hash,
+                        cache_key=sub_step.cache_key,
+                    )
+                    trace.add(sub_step_copy)
+                return result_text
+
+            # Standard subcall: single LLM call
             messages = [
                 {"role": "system", "content": self.subcall_system_prompt},
                 {"role": "user", "content": text},
             ]
-            response = self.adapter.complete(messages, max_tokens=max_tokens, temperature=0.0)
+            response = effective_subcall_adapter.complete(
+                messages, max_tokens=max_tokens, temperature=0.0
+            )
             subcall_made = True
             logger.debug("subcall complete depth=%s tokens=%s", depth, response.usage.total_tokens)
             policy.add_subcall_tokens(response.usage.total_tokens)
@@ -154,6 +257,7 @@ class RLM:
             chunk_size: int | None = None,
             overlap: int = 0,
             question: str | None = None,
+            parallel: bool | None = None,
         ) -> list[str]:
             remaining_args = list(args)
             if isinstance(chunks, str) and remaining_args:
@@ -173,16 +277,54 @@ class RLM:
                         break
             if question:
                 prepared = [f"Question: {question}\nSnippet:\n{chunk}" for chunk in prepared]
-            results: list[str] = []
-            seen: dict[str, str] = {}
-            for chunk in prepared:
-                if chunk in seen:
-                    results.append(seen[chunk])
-                    continue
-                result = subcall(chunk, model=model, max_tokens=max_tokens)
-                seen[chunk] = result
-                results.append(result)
-            return results
+
+            # Deduplicate chunks while preserving order
+            unique_chunks: list[str] = []
+            seen_set: set[str] = set()
+            chunk_indices: dict[str, int] = {}
+            for i, chunk in enumerate(prepared):
+                if chunk not in seen_set:
+                    seen_set.add(chunk)
+                    chunk_indices[chunk] = len(unique_chunks)
+                    unique_chunks.append(chunk)
+
+            # Determine if we should run in parallel
+            use_parallel = parallel if parallel is not None else self.parallel_subcalls
+
+            if use_parallel and len(unique_chunks) > 1:
+                # Paper-aligned: parallel subcalls for efficiency
+                unique_results: list[str | None] = [None] * len(unique_chunks)
+
+                def process_chunk(idx: int, chunk: str) -> tuple[int, str]:
+                    return idx, subcall(chunk, model=model, max_tokens=max_tokens)
+
+                max_workers = min(self.max_concurrent_subcalls, len(unique_chunks))
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {
+                        executor.submit(process_chunk, i, c): i
+                        for i, c in enumerate(unique_chunks)
+                    }
+                    for future in as_completed(futures):
+                        idx, result = future.result()
+                        unique_results[idx] = result
+
+                # Map results back to original order
+                chunk_to_result = {
+                    c: unique_results[i] for i, c in enumerate(unique_chunks)
+                }
+                return [chunk_to_result[c] or "" for c in prepared]
+            else:
+                # Sequential processing (original behavior)
+                results: list[str] = []
+                seen: dict[str, str] = {}
+                for chunk in prepared:
+                    if chunk in seen:
+                        results.append(seen[chunk])
+                        continue
+                    result = subcall(chunk, model=model, max_tokens=max_tokens)
+                    seen[chunk] = result
+                    results.append(result)
+                return results
 
         def ask(question: str, text: str, *, max_tokens: int = 256) -> str:
             return subcall(f"Question: {question}\nSnippet:\n{text}", max_tokens=max_tokens)
@@ -197,6 +339,7 @@ class RLM:
             max_tokens: int = 256,
             chunk_size: int | None = None,
             overlap: int = 0,
+            parallel: bool | None = None,
         ) -> list[str]:
             return ask_chunks(
                 question,
@@ -204,6 +347,7 @@ class RLM:
                 max_tokens=max_tokens,
                 chunk_size=chunk_size,
                 overlap=overlap,
+                parallel=parallel,
             )
 
         def ask_chunks(
@@ -213,6 +357,7 @@ class RLM:
             max_tokens: int = 256,
             chunk_size: int | None = None,
             overlap: int = 0,
+            parallel: bool | None = None,
         ) -> list[str]:
             return subcall_batch(
                 chunks,
@@ -220,6 +365,7 @@ class RLM:
                 max_tokens=max_tokens,
                 chunk_size=chunk_size,
                 overlap=overlap,
+                parallel=parallel,
             )
 
         def _sanitize_answer(text: str) -> str | None:
@@ -377,11 +523,34 @@ class RLM:
                 return run_fallback("subcall_guard")
             return False
 
+        def maybe_run_fallback_guard() -> bool:
+            if self.fallback_guard_steps is None:
+                return False
+            if policy.steps < self.fallback_guard_steps:
+                return False
+            if not self.auto_finalize_var:
+                return False
+            value = repl.get(self.auto_finalize_var)
+            if value is not None:
+                if isinstance(value, str):
+                    cleaned = value.strip()
+                    lowered = cleaned.lower()
+                    if cleaned and lowered not in {"no_answer", "none", "0"}:
+                        return False
+                else:
+                    return False
+            return run_fallback("fallback_guard")
+
         while True:
             policy.check_step()
+            # Get context metadata for richer user message (paper-aligned)
+            ctx_meta = context.metadata()
             user_message = build_root_user_message(
                 query=query,
-                context_len=context.len_chars(),
+                context_len=ctx_meta["total_length"],
+                context_type=ctx_meta["context_type"],
+                num_documents=ctx_meta["num_documents"],
+                document_lengths=ctx_meta.get("document_lengths"),
                 repl_executed=repl_executed,
                 last_stdout=last_stdout,
                 last_error=last_error,
@@ -435,6 +604,10 @@ class RLM:
                         resolved = maybe_auto_finalize()
                         if resolved is not None:
                             return resolved, trace
+                    if maybe_run_fallback_guard():
+                        resolved = maybe_auto_finalize()
+                        if resolved is not None:
+                            return resolved, trace
                     if (
                         self.invalid_response_limit is not None
                         and invalid_responses >= self.invalid_response_limit
@@ -478,6 +651,10 @@ class RLM:
                         resolved = maybe_auto_finalize()
                         if resolved is not None:
                             return resolved, trace
+                    if maybe_run_fallback_guard():
+                        resolved = maybe_auto_finalize()
+                        if resolved is not None:
+                            return resolved, trace
                     if (
                         self.invalid_response_limit is not None
                         and invalid_responses >= self.invalid_response_limit
@@ -504,6 +681,10 @@ class RLM:
                 last_error = "Invalid response: expected Python code or FINAL."
                 logger.debug("invalid response, skipping repl exec")
                 if maybe_run_subcall_guard():
+                    resolved = maybe_auto_finalize()
+                    if resolved is not None:
+                        return resolved, trace
+                if maybe_run_fallback_guard():
                     resolved = maybe_auto_finalize()
                     if resolved is not None:
                         return resolved, trace
@@ -554,6 +735,10 @@ class RLM:
                         resolved = maybe_auto_finalize()
                         if resolved is not None:
                             return resolved, trace
+            if maybe_run_fallback_guard():
+                resolved = maybe_auto_finalize()
+                if resolved is not None:
+                    return resolved, trace
             resolved = maybe_auto_finalize()
             if resolved is not None:
                 return resolved, trace
@@ -720,12 +905,177 @@ def _hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _cache_key(*, text: str, model: str | None, max_tokens: int) -> str:
+def _cache_key(
+    *, text: str, model: str | None, max_tokens: int, recursive: bool = False
+) -> str:
     model_part = model or "default"
-    return f"model={model_part}|max_tokens={max_tokens}|text={text}"
+    rec_part = "recursive" if recursive else "simple"
+    return f"model={model_part}|max_tokens={max_tokens}|mode={rec_part}|text={text}"
 
 
 def _truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "...<truncated>"
+
+
+def _run_recursive_subcall(
+    *,
+    text: str,
+    adapter: ModelAdapter,
+    system_prompt: str,
+    max_steps: int,
+    max_tokens: int,
+    depth: int,
+    logger: logging.Logger,
+) -> tuple[str, Trace]:
+    """Run a mini-RLM loop for a recursive subcall.
+
+    This implements the paper's concept of recursive subcalls where each subcall
+    can itself run an RLM loop to process its portion of the context.
+    """
+    from .prompts import build_root_user_message
+
+    trace = Trace(steps=[])
+    repl = PythonREPL()
+    sub_context = Context.from_text(text)
+
+    repl.set("P", sub_context.text)
+    repl.set("ctx", sub_context)
+
+    def peek(n: int = 2000) -> str:
+        return sub_context.text[:n]
+
+    def tail(n: int = 2000) -> str:
+        return sub_context.text[-n:]
+
+    def lenp() -> int:
+        return sub_context.len_chars()
+
+    repl.set("peek", peek)
+    repl.set("tail", tail)
+    repl.set("lenP", lenp)
+
+    step_id = 0
+
+    def next_step_id() -> int:
+        nonlocal step_id
+        step_id += 1
+        return step_id
+
+    # Simple subcall for nested calls (non-recursive to avoid infinite depth)
+    def simple_subcall(query_text: str, *, max_toks: int = 256) -> str:
+        from .prompts import SUBCALL_SYSTEM_PROMPT
+
+        messages = [
+            {"role": "system", "content": SUBCALL_SYSTEM_PROMPT},
+            {"role": "user", "content": query_text},
+        ]
+        response = adapter.complete(messages, max_tokens=max_toks, temperature=0.0)
+        trace.add(
+            TraceStep(
+                step_id=next_step_id(),
+                kind="subcall",
+                depth=depth + 1,
+                prompt_summary=_truncate(query_text, 240),
+                usage=response.usage,
+                cache_hit=False,
+                input_hash=_hash_text(query_text),
+                output_hash=_hash_text(response.text),
+            )
+        )
+        return response.text
+
+    repl.set("llm_query", simple_subcall)
+    repl.set("ask", lambda q, t, max_tokens=256: simple_subcall(
+        f"Question: {q}\nSnippet:\n{t}", max_toks=max_tokens
+    ))
+
+    last_stdout: str | None = None
+    last_error: str | None = None
+    repl_executed = False
+
+    for step in range(max_steps):
+        # Extract the question from the text (format: "Question: ...\nSnippet:\n...")
+        query = "Answer the question based on the provided context."
+        if text.startswith("Question:"):
+            lines = text.split("\n", 1)
+            query = lines[0].replace("Question:", "").strip()
+
+        user_message = build_root_user_message(
+            query=query,
+            context_len=sub_context.len_chars(),
+            repl_executed=repl_executed,
+            last_stdout=last_stdout,
+            last_error=last_error,
+            step=step + 1,
+            max_steps=max_steps,
+        )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ]
+        logger.debug("recursive_subcall step=%s/%s depth=%s", step + 1, max_steps, depth)
+        response = adapter.complete(messages, max_tokens=max_tokens, temperature=0.0)
+        trace.add(
+            TraceStep(
+                step_id=next_step_id(),
+                kind="root_call",
+                depth=depth,
+                prompt_summary=_truncate(user_message, 240),
+                code=_truncate(response.text, 800),
+                usage=response.usage,
+            )
+        )
+
+        cleaned = response.text.strip()
+        final = _parse_final(cleaned)
+        has_fence = "```" in cleaned
+        final_unfenced = None if has_fence else final
+
+        if final_unfenced:
+            resolved = _try_resolve_final(final_unfenced, repl)
+            if resolved is not None:
+                return resolved, trace
+            # If FINAL_VAR but variable not set, treat as error
+            last_error = "FINAL_VAR variable not found."
+            continue
+
+        code = _extract_code(cleaned)
+        final_in_code = _parse_final(code)
+        if final_in_code and not _looks_like_code(code):
+            resolved = _try_resolve_final(final_in_code, repl)
+            if resolved is not None:
+                return resolved, trace
+            last_error = "FINAL_VAR variable not found."
+            continue
+
+        if not _looks_like_code(code):
+            last_error = "Invalid response: expected Python code or FINAL."
+            continue
+
+        result = repl.exec(code)
+        last_stdout = result.stdout
+        last_error = result.error
+        repl_executed = True
+        trace.add(
+            TraceStep(
+                step_id=next_step_id(),
+                kind="repl_exec",
+                depth=depth,
+                code=_truncate(code, 800),
+                stdout=result.stdout,
+                error=result.error,
+            )
+        )
+
+        # Check for FINAL after code execution
+        if final_unfenced:
+            resolved = _try_resolve_final(final_unfenced, repl)
+            if resolved is not None:
+                return resolved, trace
+
+    # Max steps reached, return best effort from stdout or NO_ANSWER
+    if last_stdout and last_stdout.strip():
+        return last_stdout.strip(), trace
+    return "NO_ANSWER", trace

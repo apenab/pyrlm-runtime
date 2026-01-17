@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Callable, Mapping
 from typing import Any
 
 import httpx
 
 from .base import ModelAdapter, ModelResponse, Usage, estimate_usage
+
+logger = logging.getLogger(__name__)
 
 PayloadBuilder = Callable[[list[dict[str, str]], int, float, str | None], dict[str, Any]]
 ResponseParser = Callable[[dict[str, Any]], tuple[str, Usage | None]]
@@ -35,7 +39,11 @@ def default_response_parser(data: dict[str, Any]) -> tuple[str, Usage | None]:
 
 
 class GenericChatAdapter(ModelAdapter):
-    """Schema-configurable chat adapter for OpenAI-compatible endpoints."""
+    """Schema-configurable chat adapter for OpenAI-compatible endpoints.
+
+    Supports automatic retry with exponential backoff for transient errors
+    (HTTP 429, 500, 502, 503, 504).
+    """
 
     def __init__(
         self,
@@ -49,6 +57,9 @@ class GenericChatAdapter(ModelAdapter):
         payload_builder: PayloadBuilder | None = None,
         response_parser: ResponseParser | None = None,
         timeout: float = 60.0,
+        max_retries: int = 3,
+        retry_base_delay: float = 1.0,
+        retry_max_delay: float = 30.0,
     ) -> None:
         if endpoint is None:
             if not base_url:
@@ -64,6 +75,22 @@ class GenericChatAdapter(ModelAdapter):
             self.headers.update(headers)
         if api_key:
             self.headers["Authorization"] = f"Bearer {api_key}"
+        self.max_retries = max_retries
+        self.retry_base_delay = retry_base_delay
+        self.retry_max_delay = retry_max_delay
+
+    def _should_retry(self, status_code: int) -> bool:
+        """Check if the error is retryable (transient server errors)."""
+        return status_code in {429, 500, 502, 503, 504}
+
+    def _calculate_delay(self, attempt: int) -> float:
+        """Calculate exponential backoff delay with jitter."""
+        import random
+        delay = self.retry_base_delay * (2 ** attempt)
+        delay = min(delay, self.retry_max_delay)
+        # Add jitter (0.5x to 1.5x)
+        jitter = 0.5 + random.random()
+        return delay * jitter
 
     def complete(
         self,
@@ -73,13 +100,39 @@ class GenericChatAdapter(ModelAdapter):
         temperature: float = 0.0,
     ) -> ModelResponse:
         payload = self.payload_builder(messages, max_tokens, temperature, self.model)
-        with httpx.Client(timeout=self.timeout) as client:
-            response = client.post(self.endpoint, json=payload, headers=self.headers)
-            response.raise_for_status()
-            data = response.json()
+        last_error: httpx.HTTPStatusError | None = None
 
-        content, usage = self.response_parser(data)
-        if usage is None:
-            prompt = "\n".join(msg.get("content", "") for msg in messages)
-            usage = estimate_usage(prompt, content)
-        return ModelResponse(text=content, usage=usage)
+        for attempt in range(self.max_retries + 1):
+            try:
+                with httpx.Client(timeout=self.timeout) as client:
+                    response = client.post(
+                        self.endpoint, json=payload, headers=self.headers
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+
+                content, usage = self.response_parser(data)
+                if usage is None:
+                    prompt = "\n".join(msg.get("content", "") for msg in messages)
+                    usage = estimate_usage(prompt, content)
+                return ModelResponse(text=content, usage=usage)
+
+            except httpx.HTTPStatusError as e:
+                last_error = e
+                if not self._should_retry(e.response.status_code):
+                    raise
+                if attempt < self.max_retries:
+                    delay = self._calculate_delay(attempt)
+                    logger.warning(
+                        "HTTP %d error, retrying in %.1fs (attempt %d/%d)",
+                        e.response.status_code,
+                        delay,
+                        attempt + 1,
+                        self.max_retries,
+                    )
+                    time.sleep(delay)
+
+        # All retries exhausted
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Unexpected state: no response and no error")

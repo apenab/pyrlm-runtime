@@ -10,7 +10,16 @@ from .adapters.base import Usage
 @dataclass
 class TraceStep:
     step_id: int
-    kind: Literal["root_call", "repl_exec", "subcall"]
+    # Extended to support recursive subcalls and nested step types
+    kind: Literal[
+        "root_call",
+        "repl_exec",
+        "subcall",
+        "recursive_subcall",
+        "sub_root_call",
+        "sub_repl_exec",
+        "sub_subcall",
+    ]
     depth: int
     prompt_summary: str | None = None
     code: str | None = None
