@@ -53,6 +53,7 @@ class PythonREPL:
             "sum": sum,
             "sorted": sorted,
             "enumerate": enumerate,
+            "zip": zip,
             "list": list,
             "dict": dict,
             "set": set,
@@ -62,6 +63,7 @@ class PythonREPL:
             "float": float,
             "bool": bool,
             "abs": abs,
+            "round": round,
             "any": any,
             "all": all,
             "Exception": Exception,
@@ -74,7 +76,13 @@ class PythonREPL:
     def _safe_import(self, modules: Dict[str, Any]) -> Any:
         allowed = dict(modules)
 
-        def _import(name: str, globals: Dict[str, Any] | None = None, locals: Dict[str, Any] | None = None, fromlist: tuple | list = (), level: int = 0) -> Any:  # noqa: A002
+        def _import(
+            name: str,
+            globals: Dict[str, Any] | None = None,
+            locals: Dict[str, Any] | None = None,
+            fromlist: tuple | list = (),
+            level: int = 0,
+        ) -> Any:  # noqa: A002
             if name in allowed:
                 return allowed[name]
             raise ImportError(f"import of '{name}' is not allowed")

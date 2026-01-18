@@ -13,6 +13,13 @@ from .policy import (
     PolicyError,
 )
 from .rlm import RLM
+from .router import (
+    ExecutionProfile,
+    RouterConfig,
+    RouterResult,
+    SmartRouter,
+    TraceFormatter,
+)
 from .trace import Trace, TraceStep
 
 __all__ = [
@@ -32,4 +39,9 @@ __all__ = [
     "Usage",
     "FileCache",
     "RLM",
+    "SmartRouter",
+    "RouterConfig",
+    "RouterResult",
+    "ExecutionProfile",
+    "TraceFormatter",
 ]
