@@ -1,7 +1,6 @@
 # rlm-runtime
 
-Minimal runtime for **Recursive Language Models (RLMs)** inspired by the [MIT CSAIL paper](docs/rlm-paper-mit.pdf)
-"Recursive Language Models".
+Minimal runtime for **Recursive Language Models (RLMs)** inspired by the [MIT CSAIL paper](docs/rlm-paper-mit.pdf) "Recursive Language Models".
 
 ## The Problem
 
@@ -19,27 +18,43 @@ RLMs treat the long context as **environment state** instead of direct input:
 - The LLM can make **recursive subcalls** to sub-LLMs on small snippets
 - Result: Handle arbitrarily large contexts with constant token usage per step
 
-## What this is
-- A lightweight runtime loop: root LLM <-> REPL
-- Deterministic `Context` helpers (slice/find/chunk)
-- A safe-ish Python REPL with minimal builtins
-- Provider-agnostic adapters + a FakeAdapter for tests
-- Tracing + simple cache for replay
-
-## What this is not
-- A full agents framework
-- A RAG system or vector database
-- A production sandbox (this is an MVP)
-
 ## Quickstart
 
-Start with the minimal example to see RLMs in action:
-
 ```bash
+# Install
+uv pip install -e .
+
+# Set your API key
+export LLM_API_KEY="your-api-key-here"
+
+# Run a simple example
 uv run python examples/minimal.py
 ```
 
-Or jump directly to the [benchmark demo](#demo-rlm-vs-baseline-comparison) to see RLMs outperforming baseline approaches.
+**Basic usage:**
+
+```python
+from rlm_runtime import RLM, Context
+from rlm_runtime.adapters import OpenAICompatAdapter
+
+# Create context from your long documents
+documents = [
+    "Document 1: Very long content...",
+    "Document 2: More content...",
+    # ... could be 100s of documents, millions of tokens
+]
+context = Context.from_documents(documents)
+
+# Initialize RLM with OpenAI-compatible adapter
+rlm = RLM(adapter=OpenAICompatAdapter())
+
+# Ask questions over the entire context
+query = "What are the main themes across all documents?"
+answer, trace = rlm.run(query, context)
+print(answer)
+```
+
+**Works with:** OpenAI, Anthropic Claude, local Llama/Ollama servers, or any OpenAI-compatible endpoint.
 
 ## Demo: RLM vs Baseline Comparison
 
@@ -158,99 +173,6 @@ RLM Efficiency Metrics:
 
 This reproduces the key finding from Figure 1 of the MIT paper: RLMs maintain performance as context grows, while baseline approaches degrade.
 
-## How It Works: Example with FakeAdapter
-
-Here's a minimal example showing the RLM runtime loop:
-
-```python
-from rlm_runtime import Context, RLM
-from rlm_runtime.adapters import FakeAdapter
-
-# 1. Create a fake adapter for testing (simulates LLM responses)
-adapter = FakeAdapter(
-    script=[
-        # First iteration: LLM "writes" this REPL code
-        "snippet = peek(80)\nsummary = llm_query(f'Summarize: {snippet}')\nanswer = summary",
-        # Second iteration: LLM signals it's done
-        "FINAL_VAR: answer",
-    ]
-)
-# Configure subcall response
-adapter.add_rule("You are a sub-LLM", "fake summary")
-
-# 2. Create context (this would be your long document/context)
-context = Context.from_text("RLMs treat long prompts as environment state.")
-
-# 3. Run the RLM
-output, trace = RLM(adapter=adapter).run("Summarize.", context)
-print(output)  # "fake summary"
-```
-
-**What happens:**
-1. Context goes into REPL as variable `P`
-2. LLM sees only metadata (length, type) - not the full context
-3. LLM writes Python code to inspect/chunk/search the context
-4. LLM can make recursive `llm_query()` calls on small snippets
-5. Process repeats until LLM returns `FINAL()` or `FINAL_VAR()`
-
-For real usage, replace `FakeAdapter` with `OpenAICompatAdapter` or implement your own adapter.
-
-## Architecture & Design
-
-This implementation follows the MIT paper's architecture:
-
-### Core Components
-
-1. **Environment**: Long context lives as variable `P` in a Python REPL
-   - Helper functions: `peek(n)`, `tail(n)`, `lenP()` for quick inspection
-   - Safe execution environment with restricted builtins
-
-2. **Context Object**: Provides deterministic operations without LLM calls
-   - `ctx.slice(start, end)`: Extract substring
-   - `ctx.find(pattern)`: Search for text
-   - `ctx.chunk(size)`: Split into manageable pieces
-   - `ctx.chunk_documents()`: Split by document boundaries
-
-3. **Subcall Functions**: Recursive LLM queries on small snippets
-   - `llm_query(text)`: Query a sub-LLM with given text
-   - `llm_query_batch(chunks)`: Parallel queries on multiple chunks
-   - `ask(question, text)`: Ask specific question about text
-   - `ask_chunks(question, chunks)`: Ask question across multiple chunks
-
-4. **Policy Limits**: Prevent runaway execution
-   - Step budget (max iterations)
-   - Subcall budget (max recursive calls)
-   - Token budget (max total tokens)
-
-5. **Tracing**: Complete execution visibility
-   - Structured step-by-step trace
-   - Token usage breakdown (prompt, completion, cache)
-   - JSON export for analysis
-   - Subcall input/output hashing for deduplication
-
-## LLM Adapters
-
-Adapters connect the runtime to different LLM providers:
-
-### Available Adapters
-
-- **`FakeAdapter`**: For testing and examples (scripted responses)
-- **`OpenAICompatAdapter`**: For OpenAI-compatible endpoints
-  - Works with OpenAI, Anthropic, local Llama servers, etc.
-  - Environment variables:
-    - `LLM_API_KEY` (or `OPENAI_API_KEY`)
-    - `LLM_BASE_URL` (or `OPENAI_BASE_URL`)
-    - If no key set, sends no auth header (for local servers)
-- **`GenericChatAdapter`**: Schema-configurable for custom endpoints
-
-### Using Local Llama Models
-
-Local Llama models may be less compliant with the REPL protocol. Tips:
-
-- Use the stricter `LLAMA_SYSTEM_PROMPT` (imported from `rlm_runtime.system_prompts`)
-- Set `require_repl_before_final=True` to enforce at least one REPL step
-- Consider using instruction-tuned models (Llama-3-Instruct, etc.)
-
 ## Use Cases: When to Use RLMs
 
 ### Tasks from the MIT Paper
@@ -367,30 +289,37 @@ answer, trace = rlm.run(query, context)
 print(answer)
 ```
 
-## More Examples
+## Configuration
 
-Explore the `examples/` directory for more demonstrations:
+### Environment Variables
 
-- **[minimal.py](examples/minimal.py)**: Simplest possible RLM example with FakeAdapter
-- **[rlm_vs_baseline.py](examples/rlm_vs_baseline.py)**: Full benchmark showing crossover point (see [demo section](#demo-rlm-vs-baseline-comparison))
+```bash
+# API Configuration (OpenAI-compatible endpoints)
+export LLM_API_KEY="your-key"          # or OPENAI_API_KEY
+export LLM_BASE_URL="https://..."     # optional, for custom endpoints
+
+# For local models (no auth needed)
+export LLM_BASE_URL="http://localhost:11434/v1"  # Example: Ollama
+```
+
+### Supported Providers
+
+- **OpenAI**: GPT-4, GPT-3.5, etc.
+- **Anthropic**: Claude Sonnet, Opus (via OpenAI-compatible proxy)
+- **Local**: Ollama, LM Studio, vLLM, or any OpenAI-compatible server
+- **Custom**: Implement your own adapter by extending `BaseAdapter`
+
+## Examples
+
+- **[minimal.py](examples/minimal.py)**: Simplest possible RLM example
+- **[rlm_vs_baseline.py](examples/rlm_vs_baseline.py)**: Full benchmark showing crossover point
 - **[complex_reasoning.py](examples/complex_reasoning.py)**: Multi-step reasoning over long documents
-- **[hybrid_audit.py](examples/hybrid_audit.py)**: Demonstrates trajectory visualization
-- **[smart_router_demo.py](examples/smart_router_demo.py)**: Automatic baseline/RLM selection based on context size
-- **[ollama_example.py](examples/ollama_example.py)**: Using RLMs with local Ollama models
-- **[cloud_example.py](examples/cloud_example.py)**: Cloud provider integration (OpenAI, Anthropic)
-
-## Roadmap
-
-Future enhancements:
-- **Async subcalls**: Parallel execution of multiple sub-LLM queries
-- **Stronger sandboxing**: Enhanced security for REPL execution
-- **Optional tool calling**: Integration with external tools and APIs
-- **Streaming**: Support for streaming responses
-- **Multi-modal**: Support for images and other media in context
+- **[hybrid_audit.py](examples/hybrid_audit.py)**: Trajectory visualization
+- **[smart_router_demo.py](examples/smart_router_demo.py)**: Auto baseline/RLM selection
+- **[ollama_example.py](examples/ollama_example.py)**: Using local Ollama models
+- **[cloud_example.py](examples/cloud_example.py)**: Cloud provider integration
 
 ## Development
-
-### Quality Gates
 
 ```bash
 # Linting and formatting
@@ -404,10 +333,6 @@ uv run ty check
 uv run pytest
 ```
 
-### Contributing
-
-This is an MVP implementation inspired by the MIT paper. Contributions welcome!
-
 ## References
 
 - [MIT CSAIL Paper: Recursive Language Models](docs/rlm-paper-mit.pdf)
@@ -416,4 +341,4 @@ This is an MVP implementation inspired by the MIT paper. Contributions welcome!
 
 ## License
 
-[Your license here]
+MIT License - see LICENSE file for details
