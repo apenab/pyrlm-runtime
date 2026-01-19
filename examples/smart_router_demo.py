@@ -2,20 +2,20 @@
 SmartRouter Demo - Automatic Baseline/RLM Selection
 ===================================================
 
-PROPÓSITO:
-    Demostrar el SmartRouter que automáticamente elige entre baseline y RLM
-    basándose en el tamaño del contexto, eliminando overhead innecesario.
+PURPOSE:
+    Demonstrate SmartRouter automatically choosing between baseline and RLM
+    based on context size, avoiding unnecessary overhead.
 
-QUÉ DEMUESTRA:
-    1. Router automático: baseline para contextos pequeños, RLM para grandes
-    2. Execution profiles: diferentes estrategias (deterministic, semantic, hybrid)
-    3. TraceFormatter: visualización clara de qué estrategia usó el modelo
-    4. Comparación lado a lado: baseline vs RLM con métricas
+WHAT IT SHOWS:
+    1. Automatic routing: baseline for small contexts, RLM for large ones
+    2. Execution profiles: different strategies (deterministic, semantic, hybrid)
+    3. TraceFormatter: clear visualization of which strategy the model used
+    4. Side-by-side comparison: baseline vs RLM with metrics
 
-CONCEPTO CLAVE - El Crossover Point:
+KEY CONCEPT - The Crossover Point:
     ┌────────────────────────────────────────────────────────────────┐
     │                                                                │
-    │  Eficiencia ▲                                                  │
+    │  Efficiency ▲                                                  │
     │            │                                                   │
     │            │  Baseline ──────╮                                │
     │            │                  ╲                               │
@@ -27,29 +27,29 @@ CONCEPTO CLAVE - El Crossover Point:
     │            │                                                   │
     │            └─────────────────────────────────► Context Size   │
     │                                                                │
-    │  < 8K chars: Baseline (menos overhead, más rápido)            │
-    │  > 8K chars: RLM (escala mejor, puede usar regex/subcalls)    │
+    │  < 8K chars: baseline (less overhead, faster)                 │
+    │  > 8K chars: RLM (scales better, can use regex/subcalls)      │
     └────────────────────────────────────────────────────────────────┘
 
 EXECUTION PROFILES:
-    - DETERMINISTIC_FIRST: Prioriza regex/extract_after (default)
-    - SEMANTIC_BATCHES: Usa subcalls paralelos para clasificación/agregación
-    - HYBRID: Intenta determinista primero, cae a semántico si falla
-    - VERIFY: Doble-check con recursive subcalls para alta confianza
+    - DETERMINISTIC_FIRST: prioritizes regex/extract_after (default)
+    - SEMANTIC_BATCHES: uses parallel subcalls for classification/aggregation
+    - HYBRID: tries deterministic first, falls back to semantic if needed
+    - VERIFY: double-check with recursive subcalls for higher confidence
 
-VARIABLES DE ENTORNO:
-    LLM_BASE_URL       URL del servidor (default: localhost:11434)
-    LLM_MODEL          Modelo principal (default: qwen2.5-coder:7b)
-    LLM_SUBCALL_MODEL  Modelo para subcalls (opcional)
+ENVIRONMENT VARIABLES:
+    LLM_BASE_URL       Server URL (default: localhost:11434)
+    LLM_MODEL          Main model (default: qwen2.5-coder:7b)
+    LLM_SUBCALL_MODEL  Model for subcalls (optional)
 
-CÓMO EJECUTAR:
-    # Con defaults
+HOW TO RUN:
+    # With defaults
     uv run python examples/smart_router_demo.py
 
-    # Con modelo específico
+    # With a specific model
     LLM_MODEL=qwen2.5-coder:14b uv run python examples/smart_router_demo.py
 
-OUTPUT ESPERADO:
+EXPECTED OUTPUT:
     ======================================================================
     SmartRouter Demo
     ======================================================================
@@ -74,13 +74,13 @@ OUTPUT ESPERADO:
     [2] ⚙️ repl_exec → regex: r"key term is: (\\w+)" [0 tok]
     [3] 🔷 root_call → FINAL → key [800 tok]
 
-    Summary: RLM used 28% fewer tokens and found answer with regex
+    Summary: RLM used 28% fewer tokens and found the answer with regex
 
-ÚTIL PARA:
-    - Entender cuándo usar baseline vs RLM
-    - Ver qué estrategia (regex, subcall, etc.) usó el modelo
-    - Comparar métricas: tokens, tiempo, pasos
-    - Debugging: visualizar el trace completo
+USEFUL FOR:
+    - Understanding when to use baseline vs RLM
+    - Seeing which strategy (regex, subcall, etc.) the model used
+    - Comparing metrics: tokens, time, steps
+    - Debugging: inspect the full trace
 """
 
 import os
@@ -101,10 +101,10 @@ def main() -> None:
         else None
     )
 
-    # Configuración del router: threshold en 8000 chars
+    # Router configuration: threshold at 8000 chars
     config = RouterConfig(baseline_threshold=8000)
 
-    # Código fallback para extraer el término con regex
+    # Fallback code to extract the term via regex
     fallback_code = (
         "import re\n"
         "key = None\n"
@@ -128,7 +128,7 @@ def main() -> None:
     print("=" * 70)
     print()
 
-    # Test 1: Contexto pequeño (debería usar baseline)
+    # Test 1: Small context (should use baseline)
     small_context = Context.from_text(
         "RLMs are great. " * 100 + "The key term is: oolong."
     )
@@ -150,7 +150,7 @@ def main() -> None:
     print(formatter.format(result1.trace))
     print()
 
-    # Test 2: Contexto grande (debería usar RLM)
+    # Test 2: Large context (should use RLM)
     large_context = Context.from_text(
         "RLMs are great. " * 2000 + "The key term is: oolong. " + "More text. " * 1000
     )
@@ -172,7 +172,7 @@ def main() -> None:
     print(formatter.format(result2.trace))
     print()
 
-    # Comparación
+    # Comparison
     print("=" * 70)
     print("COMPARISON")
     print("=" * 70)
@@ -190,7 +190,7 @@ def main() -> None:
     print(formatter.format_table([result1, result2]))
     print()
 
-    # Test 3: Demostrar diferentes perfiles
+    # Test 3: Show different profiles
     print("=" * 70)
     print("EXECUTION PROFILES")
     print("=" * 70)

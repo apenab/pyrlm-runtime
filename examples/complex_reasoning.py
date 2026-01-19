@@ -1,98 +1,97 @@
-"""
-Benchmark Avanzado: Razonamiento Complejo con RLM
-==================================================
+Advanced Benchmark: Complex Reasoning with RLM
+================================================
 
-PROPÓSITO:
-    Demostrar las capacidades avanzadas de RLM en tareas que requieren:
-    - Razonamiento multi-hop (conectar hechos dispersos)
-    - Agregación (contar/sumar a través de documentos)
-    - Filtrado condicional
-    - Comprensión semántica (no solucionable con regex)
+PURPOSE:
+    Demonstrate advanced RLM capabilities for tasks that require:
+    - Multi-hop reasoning (linking scattered facts)
+    - Aggregation (counting/summing across documents)
+    - Conditional filtering
+    - Semantic understanding (not solvable with regex)
 
-    Estas tareas son IMPOSIBLES para modelos baseline con truncación.
+    These tasks are IMPOSSIBLE for baseline models with truncation.
 
-TIPOS DE TAREAS:
+TASK TYPES:
 
     ┌─────────────────────────────────────────────────────────────────────────┐
-    │  DETERMINISTAS (solucionables con regex)                               │
+    │  DETERMINISTIC (solvable with regex)                                   │
     ├─────────────────────────────────────────────────────────────────────────┤
     │                                                                         │
-    │  1. needle_deep - Aguja en el pajar                                    │
+    │  1. needle_deep - needle in a haystack                                 │
     │     ┌──────────────────────────────────────────────────────────────┐   │
-    │     │ Doc 1: [ruido]                                               │   │
-    │     │ Doc 2: [ruido]                                               │   │
+    │     │ Doc 1: [noise]                                               │   │
+    │     │ Doc 2: [noise]                                               │   │
     │     │ ...                                                          │   │
     │     │ Doc 90: "authorization code for Project Nexus: ALPHA-7749"   │   │
     │     │ ...                                                          │   │
-    │     │ Doc 100: [ruido]                                             │   │
+    │     │ Doc 100: [noise]                                             │   │
     │     └──────────────────────────────────────────────────────────────┘   │
-    │     La aguja está en el último 10% de documentos.                      │
-    │     Baseline trunca y la pierde. RLM usa regex para encontrarla.       │
+    │     The needle is in the last 10% of documents.                        │
+    │     Baseline truncates and loses it. RLM uses regex to find it.         │
     │                                                                         │
-    │  2. multi_hop - Razonamiento encadenado                                │
-    │     Doc X: "Alexandra Chen es CEO de NovaTech Industries"              │
-    │     Doc Y: "NovaTech Industries tiene sede en Singapore"               │
-    │     Doc Z: "NovaTech Industries reportó ingresos de $4.7B"             │
-    │     Pregunta: "¿Cuáles son los ingresos de la empresa de Alexandra?"   │
-    │     → Requiere encontrar 3 hechos y conectarlos.                       │
+    │  2. multi_hop - chained reasoning                                      │
+    │     Doc X: "Alexandra Chen is CEO of NovaTech Industries"               │
+    │     Doc Y: "NovaTech Industries is headquartered in Singapore"          │
+    │     Doc Z: "NovaTech Industries reported revenue of $4.7B"              │
+    │     Question: "What is the revenue of Alexandra's company?"            │
+    │     -> Requires finding 3 facts and linking them.                      │
     │                                                                         │
-    │  3. aggregation - Conteo a través de documentos                        │
-    │     Contar productos con "Category: electronics" en 80 documentos.     │
-    │     → RLM usa regex: len(re.findall(r"Category: electronics", P))      │
+    │  3. aggregation - counting across documents                             │
+    │     Count products with "Category: electronics" in 80 documents.        │
+    │     -> RLM uses regex: len(re.findall(r"Category: electronics", P))     │
     │                                                                         │
-    │  4. filtering - Filtrado condicional                                   │
-    │     Contar empleados en "Engineering" con salario > $100,000.          │
-    │     → RLM usa regex para extraer y filtrar.                            │
+    │  4. filtering - conditional filtering                                  │
+    │     Count employees in "Engineering" with salary > $100,000.            │
+    │     -> RLM uses regex to extract and filter.                            │
     │                                                                         │
     ├─────────────────────────────────────────────────────────────────────────┤
-    │  SEMÁNTICOS (NO solucionables con regex)                               │
+    │  SEMANTIC (NOT solvable with regex)                                     │
     ├─────────────────────────────────────────────────────────────────────────┤
     │                                                                         │
-    │  5. semantic_needle - Comprensión de significado                       │
-    │     Pregunta: "¿Cuál es la bebida favorita de Dr. Marcus Webb?"        │
-    │     Texto: "Dr. Marcus Webb typically unwinds with chamomile tea"      │
-    │     → "unwinds with" = "bebida favorita" (no es literal)               │
-    │     → Requiere subcalls para entender el contexto semántico            │
+    │  5. semantic_needle - meaning comprehension                             │
+    │     Question: "What is Dr. Marcus Webb's favorite beverage?"           │
+    │     Text: "Dr. Marcus Webb typically unwinds with chamomile tea"        │
+    │     -> "unwinds with" = "favorite beverage" (not literal)              │
+    │     -> Requires subcalls for semantic understanding                      │
     │                                                                         │
-    │  6. semantic_aggregation - Análisis de sentimiento (semi-determinista) │
-    │     Contar reseñas POSITIVAS marcadas con [POSITIVE_SENTIMENT]         │
-    │     Las reseñas tienen markers: [POSITIVE_SENTIMENT], [NEGATIVE_...    │
-    │     → El modelo debe entender que debe buscar el marker correcto       │
-    │     → Fallback usa regex para contar markers de forma confiable        │
+    │  6. semantic_aggregation - sentiment analysis (semi-deterministic)      │
+    │     Count POSITIVE reviews marked with [POSITIVE_SENTIMENT]              │
+    │     Reviews have markers: [POSITIVE_SENTIMENT], [NEGATIVE_...]          │
+    │     -> Model must identify the right marker                             │
+    │     -> Fallback uses regex to count markers reliably                     │
     │                                                                         │
     └─────────────────────────────────────────────────────────────────────────┘
 
-CROSSOVER ANALYSIS (dónde RLM empieza a ganar):
-    El benchmark prueba cada tipo de tarea con múltiples tamaños de contexto
-    para encontrar el "crossover point" donde RLM supera a baseline.
+CROSSOVER ANALYSIS (where RLM starts winning):
+    The benchmark tests each task type with multiple context sizes
+    to find the crossover point where RLM beats baseline.
 
-    Ejemplo de output:
+    Example output:
     NEEDLE DEEP:
-      → CROSSOVER at ~45,000 chars (baseline truncated: True)
+      -> CROSSOVER at ~45,000 chars (baseline truncated: True)
           20,000 chars: both pass
           45,000 chars: RLM WINS
          100,000 chars: RLM WINS
 
-VARIABLES DE ENTORNO:
-    LLM_BASE_URL              URL del servidor
-    LLM_MODEL                 Modelo principal
-    LLM_SUBCALL_MODEL         Modelo para subcalls (puede ser más pequeño)
-    RLM_MAX_STEPS             Máximo de pasos REPL (default: 25)
-    RLM_MAX_SUBCALLS          Máximo de subcalls (default: 120)
-    RLM_FALLBACK_GUARD_STEPS  Ejecutar fallback después de N pasos (default: 1)
-    BASELINE_MAX_CHARS        Límite de truncación para baseline (default: 8000)
+ENVIRONMENT VARIABLES:
+    LLM_BASE_URL              Server URL
+    LLM_MODEL                 Main model
+    LLM_SUBCALL_MODEL         Subcall model (can be smaller)
+    RLM_MAX_STEPS             Max REPL steps (default: 25)
+    RLM_MAX_SUBCALLS          Max subcalls (default: 120)
+    RLM_FALLBACK_GUARD_STEPS  Run fallback after N steps (default: 1)
+    BASELINE_MAX_CHARS        Baseline truncation limit (default: 8000)
 
-CÓMO EJECUTAR:
-    # Básico (usa qwen2.5-coder:7b por default)
+HOW TO RUN:
+    # Basic (uses qwen2.5-coder:7b by default)
     uv run python examples/complex_reasoning.py
 
-    # Con modelo más potente
+    # With a stronger model
     LLM_MODEL=qwen2.5-coder:14b uv run python examples/complex_reasoning.py
 
-    # Con logging detallado
+    # With detailed logging
     LLM_LOG_LEVEL=DEBUG uv run python examples/complex_reasoning.py
 
-OUTPUT ESPERADO:
+EXPECTED OUTPUT:
     ======================================================================
     Complex Reasoning Benchmark
     Model: qwen2.5-coder:7b
@@ -116,7 +115,7 @@ OUTPUT ESPERADO:
     ======================================================================
 
     NEEDLE DEEP:
-      → CROSSOVER at ~45,000 chars (baseline truncated: True)
+      -> CROSSOVER at ~45,000 chars (baseline truncated: True)
           20,000 chars: both pass
           45,000 chars: RLM WINS
 
@@ -125,17 +124,16 @@ OUTPUT ESPERADO:
     Semantic tasks:      RLM wins 4/4 (baseline cannot use regex)
     Deterministic tasks: RLM wins 5/9 (due to context size)
 
-INTERPRETACIÓN:
-    - Tareas deterministas: RLM gana cuando el contexto > BASELINE_MAX_CHARS
-    - Tareas semánticas: RLM gana SIEMPRE (baseline no puede usar regex)
-    - El crossover depende de dónde está la información clave en el contexto
+INTERPRETATION:
+    - Deterministic tasks: RLM wins when context > BASELINE_MAX_CHARS
+    - Semantic tasks: RLM always wins (baseline cannot use regex)
+    - The crossover depends on where key information sits in the context
 
 FALLBACK CODE:
-    Para cada tipo de tarea, hay un fallback_code específico que se ejecuta
-    si el modelo no sigue las instrucciones correctamente. Esto garantiza
-    que las tareas deterministas siempre se completen, incluso con modelos
-    que no siguen bien las instrucciones.
-"""
+    Each task type has a specific fallback_code that runs
+    if the model does not follow instructions. This ensures
+    deterministic tasks complete even with imperfect models.
+
 
 import logging
 import os

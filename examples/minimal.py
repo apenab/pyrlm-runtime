@@ -1,44 +1,44 @@
 """
-Ejemplo Mínimo de RLM (Recursive Language Model)
-================================================
+Minimal RLM Example (Recursive Language Model)
+==============================================
 
-PROPÓSITO:
-    Demostrar el flujo básico de RLM sin necesidad de un servidor LLM real.
-    Ideal para entender la arquitectura y ejecutar tests unitarios.
+PURPOSE:
+    Demonstrate the basic RLM flow without a real LLM server.
+    Ideal for understanding the architecture and running unit tests.
 
-QUÉ DEMUESTRA:
-    1. El ciclo REPL: el modelo genera código Python que se ejecuta
-    2. Sub-llamadas (subcalls): llm_query() permite consultar sub-LLMs
-    3. Finalización: FINAL_VAR devuelve el valor de una variable como respuesta
-    4. FakeAdapter: simula respuestas LLM con scripts predefinidos
+WHAT IT SHOWS:
+    1. The REPL loop: the model generates Python code that is executed
+    2. Subcalls: llm_query() lets you call sub-LLMs
+    3. Finalization: FINAL_VAR returns a variable value as the answer
+    4. FakeAdapter: simulates LLM responses with predefined scripts
 
-FLUJO DE EJECUCIÓN:
-    Paso 1: El "modelo" (FakeAdapter) genera código:
+EXECUTION FLOW:
+    Step 1: The "model" (FakeAdapter) generates code:
             snippet = peek(80)
             summary = llm_query(f'Summarize: {snippet}')
             answer = f'Summary -> {summary}'
 
-    Paso 2: El REPL ejecuta el código:
-            - peek(80) lee los primeros 80 chars del contexto
-            - llm_query() hace una subcall que retorna "[fake] short summary"
-            - answer se asigna con el resultado
+    Step 2: The REPL runs the code:
+            - peek(80) reads the first 80 chars of the context
+            - llm_query() performs a subcall returning "[fake] short summary"
+            - answer is assigned with the result
 
-    Paso 3: El modelo genera "FINAL_VAR: answer"
+    Step 3: The model emits "FINAL_VAR: answer"
 
-    Paso 4: RLM retorna el valor de `answer` como respuesta final
+    Step 4: RLM returns the value of `answer` as the final response
 
-CÓMO EJECUTAR:
+HOW TO RUN:
     uv run python examples/minimal.py
 
-OUTPUT ESPERADO:
+EXPECTED OUTPUT:
     Summary -> [fake] short summary
     Trace steps: 2
 
-POR QUÉ ES ÚTIL:
-    - No requiere Ollama ni API externa
-    - Ejecuta instantáneamente (<1s)
-    - Perfecto para tests y CI/CD
-    - Demuestra los componentes core de RLM
+WHY IT IS USEFUL:
+    - No Ollama or external API required
+    - Runs instantly (<1s)
+    - Perfect for tests and CI/CD
+    - Demonstrates core RLM components
 """
 
 from rlm_runtime import Context, RLM

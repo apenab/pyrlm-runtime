@@ -1,66 +1,66 @@
 """
-Ejemplo de RLM con API Cloud (OpenAI-compatible)
-=================================================
+RLM Example with a Cloud API (OpenAI-compatible)
+================================================
 
-PROPÓSITO:
-    Demostrar RLM conectándose a APIs cloud que requieren autenticación.
-    Útil para usar modelos más potentes como GPT-4, Claude, o APIs empresariales.
+PURPOSE:
+    Show RLM connecting to cloud APIs that require authentication.
+    Useful for stronger models like GPT-4, Claude, or enterprise APIs.
 
-QUÉ DEMUESTRA:
-    1. Autenticación con API key (Bearer token)
-    2. auto_finalize_var: si el modelo no responde FINAL, RLM usa la variable indicada
-    3. extract_after(): helper determinista para extraer texto sin subcalls
-    4. Timeout extendido para APIs cloud más lentas
+WHAT IT SHOWS:
+    1. API key authentication (Bearer token)
+    2. auto_finalize_var: if the model never emits FINAL, RLM uses the variable
+    3. extract_after(): deterministic helper to extract text without subcalls
+    4. Extended timeout for slower cloud APIs
 
-DIFERENCIAS CON OLLAMA_EXAMPLE:
+DIFFERENCES VS OLLAMA_EXAMPLE:
     ┌────────────────────┬─────────────────────┬─────────────────────┐
     │                    │   ollama_example    │   cloud_example     │
     ├────────────────────┼─────────────────────┼─────────────────────┤
-    │ Autenticación      │ Ninguna             │ API key requerida   │
-    │ Latencia           │ Baja (~100ms)       │ Alta (~1-3s)        │
-    │ Timeout default    │ 60s                 │ 180s                │
-    │ Costo              │ Gratis              │ Por token           │
-    │ auto_finalize_var  │ No                  │ Sí ("key")          │
+    │ Authentication     │ None                │ API key required    │
+    │ Latency            │ Low (~100ms)        │ Higher (~1-3s)       │
+    │ Default timeout    │ 60s                 │ 180s                │
+    │ Cost               │ Free                │ Per token           │
+    │ auto_finalize_var  │ No                  │ Yes ("key")         │
     └────────────────────┴─────────────────────┴─────────────────────┘
 
-QUÉ ES auto_finalize_var:
-    Si el modelo no genera "FINAL:" o "FINAL_VAR:", RLM automáticamente
-    retorna el valor de la variable especificada (en este caso "key").
+WHAT auto_finalize_var MEANS:
+    If the model does not emit "FINAL:" or "FINAL_VAR:", RLM automatically
+    returns the value of the specified variable (here: "key").
 
-    Ejemplo de flujo:
-    1. Modelo genera: key = extract_after('The key term is:')
-    2. REPL ejecuta: key = "oolong"
-    3. Modelo genera más código o texto sin FINAL
-    4. Se alcanza max_steps → RLM retorna valor de `key`
+    Example flow:
+    1. Model generates: key = extract_after('The key term is:')
+    2. REPL executes: key = "oolong"
+    3. Model generates more code or text without FINAL
+    4. max_steps reached -> RLM returns value of `key`
 
-VARIABLES DE ENTORNO (requeridas):
-    LLM_BASE_URL    URL del endpoint (ej: https://api.openai.com/v1)
-    LLM_API_KEY     Tu API key
+REQUIRED ENVIRONMENT VARIABLES:
+    LLM_BASE_URL    Endpoint URL (e.g., https://api.openai.com/v1)
+    LLM_API_KEY     Your API key
 
-VARIABLES DE ENTORNO (opcionales):
-    LLM_MODEL       Modelo a usar (default: nemotron-3-nano:30b-cloud)
-    LLM_TIMEOUT     Timeout en segundos (default: 180)
+OPTIONAL ENVIRONMENT VARIABLES:
+    LLM_MODEL       Model to use (default: nemotron-3-nano:30b-cloud)
+    LLM_TIMEOUT     Timeout in seconds (default: 180)
 
-CÓMO EJECUTAR:
-    # Con OpenAI
+HOW TO RUN:
+    # With OpenAI
     LLM_BASE_URL=https://api.openai.com/v1 \
     LLM_API_KEY=sk-... \
     LLM_MODEL=gpt-4o-mini \
     uv run python examples/cloud_example.py
 
-    # Con Together.ai
+    # With Together.ai
     LLM_BASE_URL=https://api.together.xyz/v1 \
     LLM_API_KEY=... \
     LLM_MODEL=meta-llama/Llama-3-70b-chat-hf \
     uv run python examples/cloud_example.py
 
-OUTPUT ESPERADO:
+EXPECTED OUTPUT:
     oolong
 
-SEGURIDAD:
-    - Nunca hardcodees tu API key en el código
-    - Usa variables de entorno o .env files
-    - El código valida que las variables requeridas estén presentes
+SECURITY:
+    - Never hardcode your API key in code
+    - Use environment variables or .env files
+    - The script validates required variables are present
 """
 
 import os

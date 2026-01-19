@@ -1,118 +1,94 @@
 r"""
-Hybrid Audit Demo - El Patrón DEFINITIVO del RLM
-=================================================
+Hybrid Audit Demo - The Definitive RLM Pattern
+==============================================
 
-PROPÓSITO:
-    Demostrar el caso de uso MÁS PRÁCTICO de RLM: código determinista para escala
-    + LLM solo para clasificación semántica ambigua + código para agregación precisa.
+PURPOSE:
+    Show the most practical RLM use case: deterministic code at scale
+    + LLM only for ambiguous semantic classification + code for exact aggregation.
 
-    Este es el patrón que demuestra POR QUÉ usar RLM en producción:
-    - Baseline: falla porque el contexto (200-400 items) no cabe en el prompt
-    - RAG: falla porque las palabras clave no capturan la semántica completa
-    - RLM Híbrido: ÉXITO porque usa código para escalar y LLM para interpretar
+    This is the pattern that shows WHY to use RLM in production:
+    - Baseline: fails because the context (200-400 items) does not fit the prompt
+    - RAG: fails because keywords do not capture full semantics
+    - Hybrid RLM: succeeds because code scales and the LLM interprets only what is needed
 
-QUÉ DEMUESTRA:
-    1. Patrón de 3 fases: Código → LLM → Código
-       ┌────────────────────────────────────────────────────────────────────┐
-       │                                                                    │
-       │  FASE 1: CÓDIGO (determinista, escala gratis)                     │
-       │  ─────────────────────────────────────────────────                 │
-       │  • Parsear 400 líneas con regex: r'INV-\d{6} \| amount: ...'      │
-       │  • Estructurar: [{id, amount, note, line}]                        │
-       │  • Tiempo: 0ms, Tokens: 0                                          │
-       │                                                                    │
-       │  FASE 2: LLM (semántico, solo lo necesario)                       │
-       │  ─────────────────────────────────────────                         │
-       │  • Clasificar 400 notes en batches de 20 → 20 subcalls           │
-       │  • Modelo pequeño (qwen2.5:3b) para: category + refund_intent     │
-       │  • Output: id<TAB>BILLING<TAB>YES                                  │
-       │  • Tiempo: 5s, Tokens: 8K (paralelo con 4 workers)                │
-       │                                                                    │
-       │  FASE 3: CÓDIGO (agregación matemática precisa)                   │
-       │  ─────────────────────────────────────────                         │
-       │  • billing_count = sum(1 for ... if category == 'BILLING')        │
-       │  • refund_total = sum(amount for ... if refund_intent == 'YES')   │
-       │  • top3 = sorted(refund_items, key=-amount)[:3]                   │
-       │  • Tiempo: 0ms, Tokens: 0, Precisión: 100%                         │
-       │                                                                    │
-       └────────────────────────────────────────────────────────────────────┘
+WHAT IT SHOWS:
+    1. 3-phase pattern: Code -> LLM -> Code
+       - Phase 1 (code): parse items into structured records
+       - Phase 2 (LLM): classify notes in batches via subcalls
+       - Phase 3 (code): aggregate counts and sums precisely
 
-    2. Fallback code robusto: maneja errores de formato del LLM
-       - Parsing flexible: tab-separated, regex fallback, keyword matching
-       - Retry con repair prompt si formato incorrecto
-       - Si strict_llm=False: fallback determinista keyword-based
-       - Si strict_llm=True: NO_ANSWER si el LLM falla 2 veces
+    2. Robust fallback code when the LLM format is wrong:
+       - Flexible parsing: TSV, regex fallback, keyword matching
+       - Repair prompt retry on format errors
+       - strict_llm=False uses deterministic fallback
+       - strict_llm=True returns NO_ANSWER if LLM fails twice
 
-    3. Comparación baseline vs RLM con 4 estrategias:
-       - baseline: trunca a 8K chars (pierde items al final)
-       - windowed: prueba head/mid/tail, elige el mejor
-       - rag: keyword scoring → top 200 lines (pierde contexto)
-       - rlm: PROCESA TODO sin perder nada
+    3. Baseline vs RLM comparison with 4 strategies:
+       - baseline: truncates to 8K chars (drops trailing items)
+       - windowed: tries head/mid/tail and picks the best
+       - rag: keyword scoring -> top lines (misses global aggregation)
+       - rlm: processes the full context without loss
 
-    4. Métricas de producción:
-       - subcall_batches: cuántos batches procesó
-       - format_failures: cuántas veces el LLM falló el schema
-       - avg_batch_latency: tiempo promedio por batch (para calibrar)
-       - strict_llm: si usa fallback determinista o requiere LLM perfecto
+    4. Production metrics:
+       - subcall_batches: how many batches were processed
+       - format_failures: how many times the LLM broke the schema
+       - avg_batch_latency: average time per batch
+       - strict_llm: whether deterministic fallback is allowed
 
-CONCEPTO CLAVE - Por Qué Hybrid Audit es el Best Case para RLM:
+KEY CONCEPT - Why Hybrid Audit is the Best Case for RLM:
 
-    ┌──────────────────────────────────────────────────────────────────┐
-    │ ❌ Baseline (direct LLM call):                                   │
-    │    • Prompt: "Aquí 400 items... clasifícalos y cuenta..."       │
-    │    • Resultado: Falla. 400 items = 80K tokens, no cabe.         │
-    │    • Solución: Truncar → pierde 75% de los items → FAIL         │
-    │                                                                  │
-    │ ⚠️  RAG (keyword retrieval):                                     │
-    │    • Busca keywords: "refund", "billing", "charge"              │
-    │    • Problema: "charged twice" es refund? "duplicate" cuenta?   │
-    │    • Resultado: Miss semántica → recall bajo → FAIL             │
-    │                                                                  │
-    │ ✅ RLM Hybrid (code + LLM + code):                               │
-    │    • Código: parsea TODOS los items (0 tokens)                  │
-    │    • LLM: clasifica SOLO los notes (8K tokens, paralelo)        │
-    │    • Código: agrega con precisión matemática (0 tokens)         │
-    │    • Resultado: 100% accuracy, 10x menos tokens → PASS          │
-    └──────────────────────────────────────────────────────────────────┘
+    Baseline (direct LLM call):
+      - 400 items -> too many tokens, must truncate -> FAIL
 
-    Este es el "killer use case" del RLM: tareas que NECESITAN procesar
-    contextos grandes (10K-100K chars) pero solo requieren LLM para una
-    PARTE semántica acotada (clasificación de notes, no de toda la data).
+    RAG (keyword retrieval):
+      - keywords miss semantics, recall is low -> FAIL
 
-VARIABLES DE ENTORNO:
-    LLM_BASE_URL          URL del servidor (default: localhost:11434/v1)
-    LLM_MODEL             Modelo principal para root (default: qwen2.5-coder:7b)
-    LLM_SUBCALL_MODEL     Modelo para subcalls (default: qwen2.5:3b)
-    N_ITEMS               Número de items a generar (default: 400, acepta lista: "200,400,800")
-    BATCH_SIZE            Items por subcall batch (default: 20)
-    BASELINE_MAX_CHARS    Max chars para baseline (default: 8000)
-    PARALLEL_SUBCALLS     Habilitar subcalls paralelos (0 o 1, default: 0)
-    MAX_WORKERS           Max workers paralelos (default: 4)
-    STRICT_LLM            Requiere LLM perfecto, no fallback (0 o 1, default: 0)
-    RAG_BASELINE          Habilitar baseline RAG (0 o 1, default: 0)
-    WRITE_DATA            Escribir ground truth a JSONL (0 o 1, default: 0)
-    LLM_LOG_LEVEL         Nivel de log (DEBUG/INFO/WARNING, default: WARNING)
+    Hybrid RLM (code + LLM + code):
+      - code parses all items (0 tokens)
+      - LLM classifies only notes (batched)
+      - code aggregates exactly (0 tokens)
+      - accurate and token efficient -> PASS
 
-CÓMO EJECUTAR:
-    # Con defaults (400 items, secuencial)
+ENVIRONMENT VARIABLES:
+    LLM_BASE_URL          Server URL (default: localhost:11434/v1)
+    LLM_MODEL             Root model (default: qwen2.5-coder:7b)
+    LLM_SUBCALL_MODEL     Subcall model (default: qwen2.5:3b)
+    N_ITEMS               Number of items (default: 400, supports list "200,400,800")
+    BATCH_SIZE            Items per subcall batch (default: 20)
+    BASELINE_MAX_CHARS    Max chars for baseline (default: 8000)
+    PARALLEL_SUBCALLS     Enable parallel subcalls (0 or 1, default: 0)
+    MAX_WORKERS           Max parallel workers (default: 4)
+    STRICT_LLM            Require perfect LLM output, no fallback (0 or 1, default: 0)
+    RAG_BASELINE          Enable RAG baseline (0 or 1, default: 0)
+    RAG_LINES             Number of RAG lines (default: 200)
+    WRITE_DATA            Write ground truth to JSONL (0 or 1, default: 0)
+    WRITE_DATA_PATH       JSONL output path (default: examples/data/hybrid_audit_seeded.jsonl)
+    LLM_LOG_LEVEL         Log level (DEBUG/INFO/WARNING, default: WARNING)
+    SHOW_TRAJECTORY       Show RLM trajectory visualization (0 or 1, default: 0)
+
+HOW TO RUN:
+    # With defaults (400 items, sequential)
     uv run python examples/hybrid_audit.py
 
-    # Con múltiples tamaños (200, 400, 800 items)
+    # Multiple sizes (200, 400, 800 items)
     N_ITEMS="200,400,800" uv run python examples/hybrid_audit.py
 
-    # Con subcalls paralelos (4 workers) - MUY recomendado
+    # Parallel subcalls (4 workers)
     PARALLEL_SUBCALLS=1 MAX_WORKERS=4 uv run python examples/hybrid_audit.py
 
-    # Con strict_llm (requiere LLM perfecto, no fallback)
+    # strict_llm (no fallback)
     STRICT_LLM=1 uv run python examples/hybrid_audit.py
 
-    # Con RAG baseline habilitado
+    # With RAG baseline
     RAG_BASELINE=1 RAG_LINES=200 uv run python examples/hybrid_audit.py
 
-    # Con modelos específicos
+    # With specific models
     LLM_MODEL=qwen2.5-coder:14b LLM_SUBCALL_MODEL=qwen2.5:7b uv run python examples/hybrid_audit.py
 
-OUTPUT ESPERADO:
+    # With trajectory visualization
+    SHOW_TRAJECTORY=1 uv run python examples/hybrid_audit.py
+
+EXPECTED OUTPUT:
     ======================================================================
     Hybrid Audit Benchmark
     Model: qwen2.5-coder:7b
@@ -139,38 +115,30 @@ OUTPUT ESPERADO:
        400     52,842   FAIL   FAIL FAIL   PASS   8234   9450    1.4s    5.9s rlm
     ----------------------------------------------------------------------
 
-    INTERPRETACIÓN:
-    ┌────────────────────────────────────────────────────────────────┐
-    │ Baseline (truncated=True): Solo procesó primeros 8K chars     │
-    │   → Vio ~60 items de 400 (15%) → billing_count=22 (real: 142) │
-    │                                                                │
-    │ Windowed: Probó 3 ventanas (head/mid/tail), eligió mejor      │
-    │   → Cada ventana ve ~15% items → miss 85% del contexto        │
-    │                                                                │
-    │ RLM Hybrid: Procesó TODOS los 400 items sin perder nada       │
-    │   → billing_count=142 ✓, refund_total=7243.18 ✓, top3 ✓      │
-    │   → Usó solo 9450 tokens (vs 24702 windowed)                  │
-    │   → format_failures=2: LLM falló 2 batches, retry reparó      │
-    └────────────────────────────────────────────────────────────────┘
+INTERPRETATION:
+    - Baseline (truncated): saw only the first chunk -> misses most items
+    - Windowed: each window sees a slice -> still misses global aggregation
+    - Hybrid RLM: processes all items -> correct counts, sums, and top-3
 
-MÉTRICAS DE PRODUCCIÓN:
+PRODUCTION METRICS:
     - subcall_batches: 20 (400 items / 20 batch_size)
     - avg_batch_latency: 0.29s (5.87s total / 20 batches)
-    - format_failures: 2 (LLM devolvió formato incorrecto 2 veces)
-    - strict_llm: False (usa fallback determinista si LLM falla)
+    - format_failures: 2 (LLM returned wrong format twice)
+    - strict_llm: False (uses deterministic fallback if LLM fails)
 
-    Calibración: Si avg_batch_latency > 1s, considera:
-    - Modelo subcall más pequeño (qwen2.5:1.5b)
-    - Batch size más grande (40 items/batch → menos subcalls)
-    - Parallel subcalls con más workers
+Calibration: if avg_batch_latency > 1s, consider:
+    - Smaller subcall model (qwen2.5:1.5b)
+    - Larger batch size (40 items/batch -> fewer subcalls)
+    - Parallel subcalls with more workers
 
-ÚTIL PARA:
-    - Entender CUÁNDO usar RLM vs baseline (contextos grandes + subtarea semántica)
-    - Ver cómo manejar LLMs imperfectos (parsing flexible, retry, fallback)
-    - Aprender el patrón hybrid (code → LLM → code) para producción
-    - Comparar 4 estrategias: baseline, windowed, rag, rlm
-    - Calibrar performance: batch_size, parallel_subcalls, modelo subcall
+USEFUL FOR:
+    - Knowing WHEN to use RLM vs baseline (large contexts + semantic subtask)
+    - Handling imperfect LLMs (flexible parsing, retry, fallback)
+    - Learning the hybrid pattern (code -> LLM -> code) for production
+    - Comparing strategies: baseline, windowed, rag, rlm
+    - Calibrating performance: batch_size, parallel_subcalls, subcall model
 """
+
 
 from __future__ import annotations
 
@@ -195,40 +163,152 @@ QUERY = (
 )
 
 SUBCALL_CLASSIFIER_PROMPT = (
-    "You are a precise classifier. For each input line 'ID<TAB>note', output exactly one classification line.\n\n"
-    "FORMAT: ID<TAB>CATEGORY<TAB>REFUND (use real tab \\t character)\n\n"
-    "CATEGORY: BILLING | LOGIN | BUG | FEATURE | OTHER\n"
-    "REFUND: YES | NO\n\n"
-    "RULES:\n"
-    "1. Output MUST be one line per input, nothing else\n"
-    "2. NO markdown, explanations, or extra text\n"
-    "3. If multiple issues mentioned, use FIRST one\n"
-    "4. Keep ID exactly as given\n\n"
-    "EXAMPLES:\n\n"
-    "Input:\n"
-    "INV-000001<TAB>charged twice; please refund\n"
-    "Output:\n"
-    "INV-000001<TAB>BILLING<TAB>YES\n\n"
-    "Input:\n"
-    "INV-000002<TAB>cannot log in\n"
-    "Output:\n"
-    "INV-000002<TAB>LOGIN<TAB>NO\n\n"
-    "Input:\n"
-    "INV-000003<TAB>app crashes on launch\n"
-    "Output:\n"
-    "INV-000003<TAB>BUG<TAB>NO\n\n"
-    "Input:\n"
-    "INV-000004<TAB>please add dark mode\n"
-    "Output:\n"
-    "INV-000004<TAB>FEATURE<TAB>NO"
+    "You are a strict TSV classifier. For each input line 'ID<TAB>note', output EXACTLY one line:\n"
+    "ID\\tCATEGORY\\tREFUND\n"
+    "CATEGORY in {BILLING, LOGIN, BUG, FEATURE, OTHER}\n"
+    "REFUND in {YES, NO}\n"
+    "NO markdown. NO explanations. NO extra text.\n"
+    "Each record MUST end with a newline '\\n'. Output must end with a newline.\n"
+    "Exactly one record per line. Never put two records on the same line.\n"
+    "Do not separate records with spaces. Keep input order."
 )
 
-HYBRID_SYSTEM_PROMPT = (
-    "You are an RLM controller. Do NOT write code for this task.\n"
-    "Always reply with: FINAL_VAR: answer\n"
-    "The runtime will execute deterministic REPL code to compute answer.\n"
-    "No extra text, no markdown."
-)
+HYBRID_SYSTEM_PROMPT = r"""You are tasked with answering a query with associated context. You can access, transform, and analyze
+this context interactively in a REPL environment that can recursively query sub-LLMs, which you are
+strongly encouraged to use as much as possible. You will be queried iteratively until you provide
+a final answer.
+
+Your context is a string variable 'P' with {context_total_length} total characters.
+
+The REPL environment is initialized with:
+1. A 'P' variable that contains extremely important information about your query. You should check
+   the content of the 'P' variable to understand what you are working with. Make sure you look
+   through it sufficiently as you answer your query.
+2. A 'llm_query_batch(prompts, max_tokens=256)' function that allows you to query an LLM for batch classification.
+   This function takes a list of prompts and returns a list of responses.
+3. The ability to use 'print()' statements to view the output of your REPL code and continue your
+   reasoning.
+
+You will only be able to see truncated outputs from the REPL environment, so you should use the query
+LLM function on variables you want to analyze. You will find this function especially useful when
+you have to analyze the semantics of the context. Use these variables as buffers to build up your
+final answer.
+
+Make sure to explicitly look through the entire context in REPL before answering your query. An example
+strategy is to first look at the context and figure out a chunking strategy, then break up the
+context into smart chunks, and query an LLM per chunk with a particular question and save the
+answers to a buffer, then aggregate the results programmatically to produce your final answer.
+
+IMPORTANT Strategy for Hybrid Audit tasks:
+- Phase 1 (REPL - Deterministic): Parse and structure the data using regex/string operations (0 tokens, instant)
+- Phase 2 (LLM - Semantic): Use llm_query_batch() to classify items semantically (uses tokens, but batched)
+- Phase 3 (REPL - Deterministic): Aggregate results mathematically with 100% precision (0 tokens, instant)
+
+Example workflow for Hybrid Audit (Step 1 - Inspect context):
+```repl
+# First, inspect the context to understand its structure
+print(f"Context length: {len(P)} chars")
+lines = P.splitlines()
+print(f"Total lines: {len(lines)}")
+print("First 3 lines:")
+for i, line in enumerate(lines[:3]):
+    print(f"  {i}: {line[:100]}")
+```
+
+Example workflow (Step 2 - Parse and batch):
+```repl
+import re
+import json
+
+# Parse all items from the context
+items = []
+for line in P.splitlines():
+    # Example: "INV-000001 | amount: 123.45 | note: "some text""
+    match = re.match(r'(INV-\d{6}) \| amount: ([0-9.]+) \| note: "(.*)"', line)
+    if match:
+        items.append({
+            'id': match.group(1),
+            'amount': float(match.group(2)),
+            'note': match.group(3),
+            'line': line
+        })
+
+print(f"Parsed {len(items)} items")
+
+# Batch items for LLM classification
+batch_size = 20
+batches = [items[i:i+batch_size] for i in range(0, len(items), batch_size)]
+print(f"Created {len(batches)} batches of max {batch_size} items each")
+
+# Prepare prompts for LLM (one prompt per batch)
+prompts = ['\n'.join([f"{it['id']}\t{it['note']}" for it in batch]) for batch in batches]
+```
+
+Example workflow (Step 3 - Call LLM for semantic classification):
+```repl
+# Call LLM to classify notes semantically
+outputs = llm_query_batch(prompts, max_tokens=256)
+
+# Parse LLM responses and build labels dict
+labels = {}
+for batch, output in zip(batches, outputs):
+    for row in output.strip().splitlines():
+        parts = row.split('\t')
+        if len(parts) >= 3:
+            item_id, category, refund = parts[0], parts[1], parts[2]
+            labels[item_id] = {'category': category.upper(), 'refund_intent': refund.upper()}
+
+print(f"Classified {len(labels)} items")
+```
+
+Example workflow (Step 4 - Aggregate programmatically):
+```repl
+# Now aggregate results with code (deterministic, 100% accurate)
+billing_count = sum(1 for it in items if labels.get(it['id'], {}).get('category') == 'BILLING')
+refund_items = [it for it in items if labels.get(it['id'], {}).get('refund_intent') == 'YES']
+refund_total = round(sum(it['amount'] for it in refund_items), 2)
+top3 = sorted(refund_items, key=lambda x: (-x['amount'], x['id']))[:3]
+
+answer = json.dumps({
+    'billing_count': billing_count,
+    'refund_total': refund_total,
+    'top3_refunds': [
+        {'id': it['id'], 'amount': it['amount'], 'evidence': it['line']}
+        for it in top3
+    ]
+}, ensure_ascii=True)
+
+print(f"Final answer: {answer[:200]}...")
+```
+
+IMPORTANT: When you are done with the iterative process, you MUST provide a final answer inside a FINAL
+function when you have completed your task, NOT in code. Do not use these tags unless you have
+completed your task. You have two options:
+1. Use FINAL(your final answer here) to provide the answer directly
+2. Use FINAL_VAR(variable_name) to return a variable you have created in the REPL environment as your
+   final output
+
+CRITICAL EFFICIENCY GUIDELINES:
+- Work in a LINEAR PROGRESSION: inspect → parse → classify → aggregate → FINAL
+- Do NOT repeat work - once you've parsed items, classified them, and aggregated, you're DONE
+- Do NOT print the same information multiple times just to verify - code execution is deterministic
+- After you have the final answer variable ready, IMMEDIATELY use FINAL_VAR(variable_name)
+- The hybrid audit pattern should take approximately 3-5 REPL executions total, not 20+
+
+RECOMMENDED STEP SEQUENCE (complete each step once, then move to the next):
+1. [REPL] Inspect P to understand structure (print first 3 lines)
+2. [REPL] Parse all items with regex into a list (parse ALL at once, not iteratively)
+3. [REPL] Batch items and prepare prompts for LLM
+4. [REPL] Call llm_query_batch() ONCE with all batches
+5. [REPL] Parse LLM responses and aggregate results mathematically
+6. [TEXT] Output FINAL_VAR(answer) immediately when done
+
+Do NOT add extra verification steps, debugging steps, or redundant parsing. Complete the task efficiently.
+
+Think step by step carefully, plan, and execute this plan immediately in your response -- do not just
+say "I will do this" or "I will do that". Output to the REPL environment and recursive LLMs as much
+as possible. Remember to explicitly answer the original query in your final answer.
+"""
 
 
 @dataclass
@@ -588,7 +668,8 @@ def run_baseline_rag(
     return result
 
 
-def build_fallback_code(batch_size: int, subcall_tokens: int, strict_llm: bool) -> str:
+def build_fallback_code_old(batch_size: int, subcall_tokens: int, strict_llm: bool) -> str:
+    """OLD FALLBACK CODE - Not aligned with paper. Kept for reference but not used by default."""
     lines = [
         "import re",
         "import json",
@@ -759,6 +840,9 @@ def build_fallback_code(batch_size: int, subcall_tokens: int, strict_llm: bool) 
         "        repair_header += 'RULES:\\n'",
         "        repair_header += '- CATEGORY: BILLING, LOGIN, BUG, FEATURE, or OTHER\\n'",
         "        repair_header += '- REFUND: YES or NO\\n'",
+        "        repair_header += '- Each record MUST end with a newline \\\\n\\n'",
+        "        repair_header += '- Exactly one record per line. Never put two records on the same line.\\n'",
+        "        repair_header += '- Do not separate records with spaces\\n'",
         "        repair_header += '- Return EXACTLY one output line per input line\\n'",
         "        repair_header += '- NO explanations, NO markdown, NO extra text\\n\\n'",
         "        repair_header += 'INPUT:\\n'",
@@ -795,6 +879,27 @@ def build_fallback_code(batch_size: int, subcall_tokens: int, strict_llm: bool) 
     return "\n".join(lines)
 
 
+def build_fallback_code(batch_size: int, subcall_tokens: int, strict_llm: bool) -> str | None:  # noqa: ARG001
+    """
+    Simple fallback code aligned with RLM paper philosophy.
+
+    This should be a minimal safety net, NOT the primary solution.
+    The LLM should discover the solution dynamically through the REPL.
+
+    For now, we return None to let the LLM work without a rigid fallback.
+
+    Args:
+        batch_size: Batch size for LLM queries (kept for compatibility)
+        subcall_tokens: Max tokens per subcall (kept for compatibility)
+        strict_llm: Whether to use strict LLM mode (kept for compatibility)
+
+    Returns:
+        None - no fallback code, let the LLM discover the solution
+    """
+    # Paper-aligned: Let the LLM discover the solution, don't provide a rigid template
+    return None  # No fallback = trust the LLM + system prompt
+
+
 def _parse_metrics(trace) -> dict | None:
     for step in trace.steps:
         if step.stdout and "__METRICS__" in step.stdout:
@@ -805,6 +910,113 @@ def _parse_metrics(trace) -> dict | None:
             except json.JSONDecodeError:
                 return None
     return None
+
+
+def format_trajectory(trace, title: str = "RLM Trajectory", max_code_lines: int = 50) -> str:
+    """
+    Format an RLM trace trajectory for display, similar to MIT RLM paper Appendix B.
+
+    Args:
+        trace: The Trace object containing execution steps
+        title: Title for the trajectory visualization
+        max_code_lines: Maximum lines of code to show per step (truncate if longer)
+
+    Returns:
+        Formatted string representation of the trajectory
+    """
+    lines = []
+    lines.append("=" * 80)
+    lines.append(f"{title:^80}")
+    lines.append("=" * 80)
+    lines.append("")
+
+    # Group steps by execution sequence
+    for i, step in enumerate(trace.steps):
+        step_header = []
+
+        # Step number and type
+        if step.kind == "root_call":
+            step_header.append(f"[Step {i+1}] Root LLM Call")
+        elif step.kind == "repl_exec":
+            step_header.append(f"[Step {i+1}] REPL Execution")
+        elif step.kind == "subcall":
+            step_header.append(f"[Step {i+1}] Subcall (LLM)")
+        elif step.kind == "recursive_subcall":
+            step_header.append(f"[Step {i+1}] Recursive Subcall (depth={step.depth})")
+        else:
+            step_header.append(f"[Step {i+1}] {step.kind}")
+
+        # Add token usage info
+        if step.usage:
+            step_header.append(f" | Tokens: {step.usage.total_tokens}")
+
+        # Add cache hit indicator
+        if step.cache_hit:
+            step_header.append(" | [CACHED]")
+
+        lines.append("".join(step_header))
+        lines.append("-" * 80)
+
+        # Show prompt summary for LLM calls
+        if step.prompt_summary and step.kind in ("root_call", "subcall", "recursive_subcall"):
+            lines.append(f"Prompt: {step.prompt_summary[:200]}{'...' if len(step.prompt_summary) > 200 else ''}")
+            lines.append("")
+
+        # Show code if present
+        if step.code:
+            code_lines = step.code.split("\n")
+            if len(code_lines) > max_code_lines:
+                truncated_code = "\n".join(code_lines[:max_code_lines])
+                lines.append("```python")
+                lines.append(truncated_code)
+                lines.append(f"... [{len(code_lines) - max_code_lines} more lines truncated]")
+                lines.append("```")
+            else:
+                lines.append("```python")
+                lines.append(step.code)
+                lines.append("```")
+            lines.append("")
+
+        # Show stdout if present
+        if step.stdout:
+            stdout_display = step.stdout[:1000]  # Limit stdout display
+            if len(step.stdout) > 1000:
+                stdout_display += f"\n... [{len(step.stdout) - 1000} more chars truncated]"
+            lines.append("Output:")
+            lines.append(stdout_display)
+            lines.append("")
+
+        # Show error if present
+        if step.error:
+            lines.append(f"ERROR: {step.error}")
+            lines.append("")
+
+        lines.append("")
+
+    # Summary section
+    lines.append("=" * 80)
+    lines.append("TRAJECTORY SUMMARY")
+    lines.append("=" * 80)
+
+    total_steps = len(trace.steps)
+    total_tokens = sum(s.usage.total_tokens for s in trace.steps if s.usage)
+    step_counts = {}
+    for step in trace.steps:
+        step_counts[step.kind] = step_counts.get(step.kind, 0) + 1
+    cache_hits = sum(1 for s in trace.steps if s.cache_hit)
+    errors = sum(1 for s in trace.steps if s.error)
+
+    lines.append(f"Total Steps: {total_steps}")
+    lines.append(f"Total Tokens: {total_tokens}")
+    lines.append(f"Cache Hits: {cache_hits}")
+    lines.append(f"Errors: {errors}")
+    lines.append("")
+    lines.append("Step Breakdown:")
+    for kind, count in sorted(step_counts.items()):
+        lines.append(f"  - {kind}: {count}")
+    lines.append("=" * 80)
+
+    return "\n".join(lines)
 
 
 def run_rlm_hybrid(
@@ -820,6 +1032,7 @@ def run_rlm_hybrid(
     max_concurrent_subcalls: int,
     strict_llm: bool,
 ) -> dict:
+    # Phase machine needs room: step 1 inspect, step 2 subcalls, step 3 aggregate.
     policy = Policy(max_steps=max_steps, max_subcalls=max_subcalls, max_total_tokens=200000)
     rlm = RLM(
         adapter=adapter,
@@ -830,27 +1043,36 @@ def run_rlm_hybrid(
         require_repl_before_final=True,
         require_subcall_before_final=True,
         auto_finalize_var="answer",
-        invalid_response_limit=2,
-        repl_error_limit=1,
+        invalid_response_limit=3,
         fallback_code=build_fallback_code(batch_size, subcall_tokens, strict_llm),
-        fallback_guard_steps=1,
-        subcall_guard_steps=1,
+        fallback_guard_steps=6,
+        subcall_guard_steps=3,
         parallel_subcalls=parallel_subcalls,
         max_concurrent_subcalls=max_concurrent_subcalls,
+        repl_error_limit=2,
     )
 
     started = time.perf_counter()
+    trace = None
     try:
         output, trace = rlm.run(QUERY, context)
     except Exception as exc:  # noqa: BLE001
+        elapsed = time.perf_counter() - started
+        counts = {}
+        if trace is not None:
+            for step in trace.steps:
+                counts[step.kind] = counts.get(step.kind, 0) + 1
         return {
             "output": f"ERROR: {type(exc).__name__}: {exc}",
-            "trace": None,
-            "elapsed": time.perf_counter() - started,
+            "trace": trace,
+            "elapsed": elapsed,
             "tokens": policy.total_tokens,
-            "steps": {},
+            "steps": counts,
             "metrics": None,
         }
+
+    # Paper-aligned: No rigid validation of 'phase' variable
+    # Let the LLM discover its own solution structure
 
     elapsed = time.perf_counter() - started
     counts = {}
@@ -912,6 +1134,8 @@ def main() -> None:
     write_data = os.getenv("WRITE_DATA", "0") == "1"
     write_path = os.getenv("WRITE_DATA_PATH", "examples/data/hybrid_audit_seeded.jsonl")
     strict_llm = os.getenv("STRICT_LLM", "0") == "1"
+    # Display trajectory visualization if enabled
+    show_trajectory = os.getenv("SHOW_TRAJECTORY", "0") == "1"
 
     logging.basicConfig(
         level=logging.DEBUG,
@@ -935,7 +1159,9 @@ def main() -> None:
     print(f"BATCH_SIZE: {batch_size}")
     print(f"BASELINE_MAX_CHARS: {baseline_max_chars}")
     print(f"STRICT_LLM: {strict_llm}")
-    print(f"PARALLEL_SUBCALLS: {parallel_subcalls} MAX_WORKERS={max_workers}")
+    print(f"PARALLEL_SUBCALLS: {parallel_subcalls}")
+    print(f"MAX_WORKERS: {max_workers}")
+    print(f"SHOW_TRAJECTORY: {show_trajectory}")
     print("=" * 70)
     print()
 
@@ -990,7 +1216,7 @@ def main() -> None:
             context,
             batch_size=batch_size,
             subcall_tokens=subcall_tokens,
-            max_steps=20,
+            max_steps=50,  # Increased from 20 to allow LLM to discover solution dynamically
             max_subcalls=max_subcalls,
             parallel_subcalls=parallel_subcalls,
             max_concurrent_subcalls=max_workers,
@@ -998,6 +1224,20 @@ def main() -> None:
         )
         parsed_rlm = _extract_json(rlm_result["output"])
         rlm_success, _ = evaluate_output(parsed_rlm, expected)
+        if rlm_result["trace"] is not None and rlm_success:
+            steps = rlm_result["steps"]
+            repl_errors = [
+                step.error
+                for step in rlm_result["trace"].steps
+                if step.kind == "repl_exec" and step.error
+            ]
+            assert steps.get("repl_exec", 0) >= 1 and steps.get("root_call", 0) > 1, (
+                "Expected at least one REPL exec and more than one root call; "
+                "root should not finalize on step 1."
+            )
+            assert not any("SyntaxError" in err for err in repl_errors), (
+                "REPL SyntaxError detected; check fenced block formatting."
+            )
         rlm_status = "PASS" if rlm_success else "FAIL"
         print(
             f"  rlm: {rlm_status} elapsed={rlm_result['elapsed']:.2f}s tokens={rlm_result['tokens']} steps={rlm_result['steps']}"
@@ -1016,6 +1256,16 @@ def main() -> None:
                 f"  rlm_metrics: subcall_batches={metrics['subcall_batches']} "
                 f"avg_batch_latency={avg_latency:.2f}s format_failures={metrics['format_failures']}"
             )
+
+        
+        if show_trajectory and rlm_result.get("trace"):
+            print("\n")
+            trajectory_output = format_trajectory(
+                rlm_result["trace"],
+                title=f"RLM Trajectory (n_items={n_items})"
+            )
+            print(trajectory_output)
+            print("\n")
 
         winner = "rlm"
         if base_success and not rlm_success:

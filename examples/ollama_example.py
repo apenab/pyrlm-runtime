@@ -1,55 +1,55 @@
 """
-Ejemplo de RLM con Ollama Local
-================================
+RLM Example with Local Ollama
+=============================
 
-PROPÓSITO:
-    Demostrar RLM ejecutándose con un modelo LLM real a través de Ollama.
-    Es el "Hello World" funcional que conecta con un servidor local.
+PURPOSE:
+    Demonstrate RLM running with a real LLM through Ollama.
+    This is the functional "Hello World" that connects to a local server.
 
-QUÉ DEMUESTRA:
-    1. GenericChatAdapter: conecta con cualquier API compatible OpenAI
-    2. Policy: límites de ejecución (pasos, tokens, subcalls)
-    3. require_repl_before_final: obliga al modelo a ejecutar código antes de responder
-    4. LLAMA_SYSTEM_PROMPT: prompt de sistema optimizado para modelos Llama/Qwen
+WHAT IT SHOWS:
+    1. GenericChatAdapter: connects to any OpenAI-compatible API
+    2. Policy: execution limits (steps, tokens, subcalls)
+    3. require_repl_before_final: forces the model to execute code before answering
+    4. LLAMA_SYSTEM_PROMPT: system prompt tuned for Llama/Qwen models
 
-ARQUITECTURA RLM (del paper MIT CSAIL):
+RLM ARCHITECTURE (MIT CSAIL paper):
     ┌─────────────────────────────────────────────────────────┐
-    │  RLM trata el prompt largo como "estado del entorno"    │
-    │  en lugar de pasarlo completo al modelo.                │
+    │  RLM treats the long prompt as "environment state"      │
+    │  instead of sending it fully to the model.              │
     │                                                         │
-    │  Contexto (P) ─┬─► REPL Python ◄── Código generado     │
-    │                │       │                                │
-    │                │       ▼                                │
-    │                └─► peek(), ctx.find(), llm_query()     │
+    │  Context (P) ─┬─► Python REPL ◄── Generated code        │
+    │              │       │                                  │
+    │              │       ▼                                  │
+    │              └─► peek(), ctx.find(), llm_query()        │
     │                                                         │
-    │  El modelo INSPECCIONA el contexto programáticamente    │
-    │  en lugar de verlo todo de una vez.                     │
+    │  The model INSPECTS the context programmatically        │
+    │  instead of seeing it all at once.                      │
     └─────────────────────────────────────────────────────────┘
 
-REQUISITOS PREVIOS:
-    1. Instalar Ollama: https://ollama.ai/download
-    2. Descargar un modelo: ollama pull llama3.2:latest
-    3. Iniciar el servidor: ollama serve (o ya corre como servicio)
+PREREQUISITES:
+    1. Install Ollama: https://ollama.ai/download
+    2. Download a model: ollama pull llama3.2:latest
+    3. Start the server: ollama serve (or it may already run as a service)
 
-VARIABLES DE ENTORNO:
-    LLM_BASE_URL    URL del servidor (default: http://localhost:11434/v1)
-    LLM_MODEL       Modelo a usar (default: llama3.2:latest)
+ENVIRONMENT VARIABLES:
+    LLM_BASE_URL    Server URL (default: http://localhost:11434/v1)
+    LLM_MODEL       Model to use (default: llama3.2:latest)
 
-CÓMO EJECUTAR:
-    # Con defaults
+HOW TO RUN:
+    # With defaults
     uv run python examples/ollama_example.py
 
-    # Con modelo específico
+    # With a specific model
     LLM_MODEL=qwen2.5-coder:7b uv run python examples/ollama_example.py
 
-OUTPUT ESPERADO:
+EXPECTED OUTPUT:
     oolong
 
-MODELOS RECOMENDADOS (en orden de calidad):
-    - qwen2.5-coder:14b   ← Mejor seguimiento de instrucciones
-    - qwen2.5-coder:7b    ← Buen balance calidad/velocidad
-    - deepseek-coder:6.7b ← Alternativa sólida
-    - llama3.2:latest     ← Default, funciona pero menos preciso
+RECOMMENDED MODELS (by quality):
+    - qwen2.5-coder:14b   <- Best instruction following
+    - qwen2.5-coder:7b    <- Good quality/speed balance
+    - deepseek-coder:6.7b <- Solid alternative
+    - llama3.2:latest     <- Default, works but less precise
 """
 
 import os
