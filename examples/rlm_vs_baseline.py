@@ -61,6 +61,7 @@ VARIABLES DE ENTORNO:
     BASELINE_MAX_CHARS        Límite de truncación para baseline (default: 8000)
     RLM_PARALLEL_SUBCALLS     Habilitar subcalls paralelos (default: 1)
     RLM_FALLBACK              Habilitar fallback code (default: 1)
+    SHOW_TRAJECTORY           Mostrar visualización de trayectoria RLM estilo paper MIT (0 o 1, default: 0)
 
 CÓMO EJECUTAR:
     # Básico
@@ -71,6 +72,9 @@ CÓMO EJECUTAR:
 
     # Con modelo de subcall separado (más eficiente)
     LLM_SUBCALL_MODEL=qwen2.5:3b uv run python examples/rlm_vs_baseline.py
+
+    # Con visualización de trayectoria (estilo paper MIT Appendix B)
+    SHOW_TRAJECTORY=1 uv run python examples/rlm_vs_baseline.py
 
 OUTPUT ESPERADO:
     ============================================================
@@ -107,7 +111,49 @@ from collections import Counter
 
 from rlm_runtime import Context, Policy, RLM
 from rlm_runtime.adapters import GenericChatAdapter
-from rlm_runtime.prompts import LLAMA_SYSTEM_PROMPT, TINYLLAMA_SYSTEM_PROMPT
+# We define our own system prompt tailored to the needle-in-haystack task
+
+# Paper-aligned system prompt for needle-in-haystack tasks (Appendix D.1 style)
+RLM_SYSTEM_PROMPT = """You are tasked with answering a query with associated context. You can access, transform, and analyze this context interactively in a REPL environment that can recursively query sub-LLMs, which you are strongly encouraged to use as much as possible. You will be queried iteratively until you provide a final answer.
+
+The REPL environment is initialized with:
+1. A 'P' variable (string) containing the full context - it may be too large for your context window.
+2. A 'ctx' variable (Context object) with helpers for safe inspection.
+3. Helper functions: peek(n), tail(n), lenP(), ctx.slice, ctx.find, ctx.chunk, ctx.chunk_documents.
+4. Sub-LLM functions: llm_query(text), llm_query_batch(chunks), ask(question, text), ask_chunks(question, chunks), ask_chunks_first(question, chunks).
+5. Utilities: pick_first_answer(answers), extract_after(marker).
+6. The ability to use print() statements to view the output of your REPL code and continue reasoning.
+
+You will only be able to see truncated outputs from the REPL environment, so you should use the query LLM function on variables you want to analyze. You will find this function especially useful when you have to analyze the semantics of the context.
+
+IMPORTANT OPTIMIZATION: For needle-in-haystack tasks, ALWAYS try deterministic extraction FIRST before using expensive LLM subcalls:
+1. Try extract_after(marker) to find the answer using string search (0 tokens, instant)
+2. Only if that fails, use ask_chunks or llm_query on portions of the context
+
+RECOMMENDED STRATEGY for needle-in-haystack tasks:
+```
+# Phase 0: Try deterministic extraction first (0 tokens)
+key = extract_after('The key term is:')
+if key:
+    # Found it! No need for LLM subcalls
+    print(f"Found key: {key}")
+else:
+    # Phase 1: Need to search semantically with LLM
+    chunks = [c[2] for c in ctx.chunk(50000)]  # Large chunks to minimize subcalls
+    key = ask_chunks_first("What is the key term?", chunks)
+    print(f"Found via subcalls: {key}")
+```
+
+Remember that your sub-LLMs are powerful -- they can fit around 500K characters in their context window, so don't be afraid to put a lot of context into them. For example, a viable strategy is to feed 10-20 documents per sub-LLM query. Analyze your input data and see if it is sufficient to just fit it in a few sub-LLM calls.
+
+IMPORTANT: Be careful about using llm_query as it incurs high runtime costs. Always batch as much information as reasonably possible into each call (aim for ~200k characters per call). For example, if you have 100 documents to process, split into chunks of 10-20 documents and call llm_query on each chunk (5-10 calls total) rather than 100 individual calls.
+
+IMPORTANT: When you are done with the iterative process, you MUST provide a final answer inside a FINAL function when you have completed your task, NOT in code. Do not use these tags unless you have completed your task. You have two options:
+1. Use FINAL: <your final answer here> to provide the answer directly
+2. Use FINAL_VAR: <variable_name> to return a variable you have created in the REPL environment as your final output
+
+Think step by step carefully, plan, and execute this plan immediately in your response -- do not just say "I will do this" or "I will do that". Output to the REPL environment and recursive LLMs as much as possible. Remember to explicitly answer the original query in your final answer.
+"""
 
 KEY_MARKER = "The key term is:"
 KEY_VALUE = "oolong"
@@ -163,8 +209,8 @@ def run_rlm(
     parallel_subcalls: bool,
     max_concurrent_subcalls: int,
 ) -> dict:
-    is_tiny = "tinyllama" in model.lower()
-    system_prompt = TINYLLAMA_SYSTEM_PROMPT if is_tiny else LLAMA_SYSTEM_PROMPT
+    # Use our custom needle-in-haystack optimized prompt for all models
+    system_prompt = RLM_SYSTEM_PROMPT
 
     if not fallback_enabled:
         fallback_code = None
@@ -194,6 +240,7 @@ def run_rlm(
     )
 
     started = time.perf_counter()
+    trace = None
     try:
         output, trace = rlm.run(query, context)
     except Exception as exc:  # noqa: BLE001
@@ -204,12 +251,34 @@ def run_rlm(
             "tokens": policy.total_tokens,
             "calls": policy.subcalls + policy.steps,
             "steps": {"error": type(exc).__name__},
+            "trace": trace,  # Include trace even on error
         }
     elapsed = time.perf_counter() - started
 
     counts = Counter(step.kind for step in trace.steps)
     tokens = sum(step.usage.total_tokens for step in trace.steps if step.usage is not None)
     calls = counts.get("root_call", 0) + counts.get("subcall", 0)
+
+    # Collect detailed metrics (token breakdown, cache hits, subcall stats)
+    prompt_tokens = sum(step.usage.prompt_tokens for step in trace.steps if step.usage)
+    completion_tokens = sum(step.usage.completion_tokens for step in trace.steps if step.usage)
+    cache_read_tokens = sum(
+        getattr(step.usage, "cache_read_input_tokens", 0) for step in trace.steps if step.usage
+    )
+    cache_creation_tokens = sum(
+        getattr(step.usage, "cache_creation_input_tokens", 0) for step in trace.steps if step.usage
+    )
+    cache_hits = sum(1 for step in trace.steps if step.cache_hit)
+
+    # Subcall-specific metrics
+    subcall_steps = [s for s in trace.steps if s.kind == "subcall"]
+    subcall_count = len(subcall_steps)
+    subcall_tokens = sum(s.usage.total_tokens for s in subcall_steps if s.usage)
+    subcall_avg_tokens = subcall_tokens / subcall_count if subcall_count > 0 else 0
+
+    # REPL execution metrics
+    repl_execs = counts.get("repl_exec", 0)
+    repl_errors = sum(1 for s in trace.steps if s.kind == "repl_exec" and s.error)
 
     return {
         "mode": "rlm",
@@ -218,6 +287,31 @@ def run_rlm(
         "tokens": tokens,
         "calls": calls,
         "steps": dict(counts),
+        "trace": trace,  # Include trace for trajectory visualization
+        # Detailed metrics for demo presentation
+        "metrics": {
+            "token_breakdown": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": tokens,
+                "cache_read_tokens": cache_read_tokens,
+                "cache_creation_tokens": cache_creation_tokens,
+            },
+            "cache": {
+                "hits": cache_hits,
+                "total_steps": len(trace.steps),
+                "hit_rate": cache_hits / len(trace.steps) if trace.steps else 0,
+            },
+            "subcalls": {
+                "count": subcall_count,
+                "total_tokens": subcall_tokens,
+                "avg_tokens_per_subcall": round(subcall_avg_tokens, 1),
+            },
+            "repl": {
+                "executions": repl_execs,
+                "errors": repl_errors,
+            },
+        },
     }
 
 
@@ -319,6 +413,396 @@ def pick_winner(baseline: dict, rlm: dict) -> str:
             return "baseline (fewer tokens)"
         return "tie"
     return "tie"
+
+
+def format_trajectory(trace, title: str = "RLM Trajectory", max_code_lines: int = 50) -> str:
+    """
+    Format an RLM trace trajectory for display, similar to MIT RLM paper Appendix B.
+
+    Args:
+        trace: The Trace object containing execution steps
+        title: Title for the trajectory visualization
+        max_code_lines: Maximum lines of code to show per step (truncate if longer)
+
+    Returns:
+        Formatted string representation of the trajectory
+    """
+    lines = []
+    lines.append("=" * 80)
+    lines.append(f"{title:^80}")
+    lines.append("=" * 80)
+    lines.append("")
+
+    # Group steps by execution sequence
+    for i, step in enumerate(trace.steps):
+        step_header = []
+
+        # Step number and type
+        if step.kind == "root_call":
+            step_header.append(f"[Step {i+1}] Root LLM Call")
+        elif step.kind == "repl_exec":
+            step_header.append(f"[Step {i+1}] REPL Execution")
+        elif step.kind == "subcall":
+            step_header.append(f"[Step {i+1}] Subcall (LLM)")
+        elif step.kind == "recursive_subcall":
+            step_header.append(f"[Step {i+1}] Recursive Subcall (depth={step.depth})")
+        else:
+            step_header.append(f"[Step {i+1}] {step.kind}")
+
+        # Add token usage info
+        if step.usage:
+            step_header.append(f" | Tokens: {step.usage.total_tokens}")
+
+        # Add cache hit indicator
+        if step.cache_hit:
+            step_header.append(" | [CACHED]")
+
+        lines.append("".join(step_header))
+        lines.append("-" * 80)
+
+        # Show prompt summary for LLM calls
+        if step.prompt_summary and step.kind in ("root_call", "subcall", "recursive_subcall"):
+            lines.append(f"Prompt: {step.prompt_summary[:200]}{'...' if len(step.prompt_summary) > 200 else ''}")
+            lines.append("")
+
+        # Show code if present
+        if step.code:
+            code_lines = step.code.split("\n")
+            if len(code_lines) > max_code_lines:
+                truncated_code = "\n".join(code_lines[:max_code_lines])
+                lines.append("```python")
+                lines.append(truncated_code)
+                lines.append(f"... [{len(code_lines) - max_code_lines} more lines truncated]")
+                lines.append("```")
+            else:
+                lines.append("```python")
+                lines.append(step.code)
+                lines.append("```")
+            lines.append("")
+
+        # Show stdout if present
+        if step.stdout:
+            stdout_display = step.stdout[:1000]  # Limit stdout display
+            if len(step.stdout) > 1000:
+                stdout_display += f"\n... [{len(step.stdout) - 1000} more chars truncated]"
+            lines.append("Output:")
+            lines.append(stdout_display)
+            lines.append("")
+
+        # Show error if present
+        if step.error:
+            lines.append(f"ERROR: {step.error}")
+            lines.append("")
+
+        lines.append("")
+
+    # Summary section
+    lines.append("=" * 80)
+    lines.append("TRAJECTORY SUMMARY")
+    lines.append("=" * 80)
+
+    total_steps = len(trace.steps)
+    total_tokens = sum(s.usage.total_tokens for s in trace.steps if s.usage)
+    step_counts = {}
+    for step in trace.steps:
+        step_counts[step.kind] = step_counts.get(step.kind, 0) + 1
+    cache_hits = sum(1 for s in trace.steps if s.cache_hit)
+    errors = sum(1 for s in trace.steps if s.error)
+
+    lines.append(f"Total Steps: {total_steps}")
+    lines.append(f"Total Tokens: {total_tokens}")
+    lines.append(f"Cache Hits: {cache_hits}")
+    lines.append(f"Errors: {errors}")
+    lines.append("")
+    lines.append("Step Breakdown:")
+    for kind, count in sorted(step_counts.items()):
+        lines.append(f"  - {kind}: {count}")
+    lines.append("=" * 80)
+
+    return "\n".join(lines)
+
+
+def plot_crossover_ascii(summary_rows: list[dict]) -> str:
+    """
+    Generate an ASCII art plot showing the crossover point between RLM and baseline.
+
+    Visualizes how accuracy and token usage change with context size, highlighting
+    where RLM starts outperforming the baseline approach.
+    """
+    if not summary_rows:
+        return ""
+
+    lines = []
+    lines.append("")
+    lines.append("=" * 100)
+    lines.append("CROSSOVER POINT VISUALIZATION".center(100))
+    lines.append("=" * 100)
+    lines.append("")
+
+    # Extract data
+    docs = [r["docs"] for r in summary_rows]
+    baseline_ok = [1 if r["baseline_ok"] else 0 for r in summary_rows]
+    rlm_ok = [1 if r["rlm_ok"] else 0 for r in summary_rows]
+    baseline_tokens = [r["baseline_tokens"] for r in summary_rows]
+    rlm_tokens = [r["rlm_tokens"] for r in summary_rows]
+
+    # Plot 1: Accuracy (Success Rate)
+    lines.append("SUCCESS RATE vs CONTEXT SIZE:")
+    lines.append("-" * 100)
+    lines.append("")
+
+    height = 10
+    width = min(80, len(docs) * 12)
+
+    # Create grid
+    grid = [[" " for _ in range(width)] for _ in range(height)]
+
+    # Draw axes
+    for y in range(height):
+        grid[y][0] = "│"
+    for x in range(width):
+        grid[height - 1][x] = "─"
+    grid[height - 1][0] = "└"
+
+    # Plot baseline (✗ = fail, ✓ = success)
+    for i, (doc_count, ok) in enumerate(zip(docs, baseline_ok)):
+        x = int((i / (len(docs) - 1)) * (width - 5)) + 2 if len(docs) > 1 else width // 2
+        if x < width:
+            if ok:
+                y = 1  # Success at top
+                grid[y][x] = "B"
+            else:
+                y = height - 3  # Failure at bottom
+                grid[y][x] = "b"
+
+    # Plot RLM (✗ = fail, ✓ = success)
+    for i, (doc_count, ok) in enumerate(zip(docs, rlm_ok)):
+        x = int((i / (len(docs) - 1)) * (width - 5)) + 2 if len(docs) > 1 else width // 2
+        if x < width:
+            if ok:
+                y = 2  # Success at top (slightly below baseline)
+                if grid[y][x] == " ":
+                    grid[y][x] = "R"
+                else:
+                    grid[y][x] = "*"  # Both succeed
+            else:
+                y = height - 2  # Failure at bottom
+                grid[y][x] = "r"
+
+    # Add labels
+    lines.append("  100% ┤ Success")
+    for row in grid[:height-1]:
+        lines.append("       " + "".join(row))
+    lines.append("    0% " + "".join(grid[height-1]))
+
+    # X-axis labels
+    x_labels = "         "
+    for i, doc_count in enumerate(docs):
+        if len(docs) > 1:
+            x_pos = int((i / (len(docs) - 1)) * (width - 5)) + 2
+        else:
+            x_pos = width // 2
+        label = f"{doc_count}"
+        # Pad to position
+        while len(x_labels) < x_pos + 7:
+            x_labels += " "
+        x_labels += label
+
+    lines.append(x_labels)
+    lines.append("         " + "Context Size (documents)".center(width))
+    lines.append("")
+    lines.append("  Legend: B=Baseline OK | b=Baseline FAIL | R=RLM OK | r=RLM FAIL | *=Both OK")
+    lines.append("")
+
+    # Plot 2: Token Usage Comparison
+    lines.append("")
+    lines.append("TOKEN USAGE vs CONTEXT SIZE:")
+    lines.append("-" * 100)
+    lines.append("")
+
+    if baseline_tokens and rlm_tokens:
+        max_tokens = max(max(baseline_tokens), max(rlm_tokens))
+
+        # Normalize to 0-100 range
+        def normalize(val):
+            return int((val / max_tokens) * 40) if max_tokens > 0 else 0
+
+        for i, (doc_count, b_tok, r_tok) in enumerate(zip(docs, baseline_tokens, rlm_tokens)):
+            b_bar = normalize(b_tok)
+            r_bar = normalize(r_tok)
+
+            label = f"{doc_count:>4} docs │"
+            b_visual = "B" * b_bar
+            r_visual = "R" * r_bar
+
+            lines.append(f"{label} {b_visual:<42} ({b_tok:>6} tokens)")
+            lines.append(f"{'':>10} {r_visual:<42} ({r_tok:>6} tokens)")
+            lines.append("")
+
+        lines.append("  Legend: B=Baseline tokens | R=RLM tokens")
+        lines.append(f"  Scale: {max_tokens:,} tokens = 40 chars")
+
+    lines.append("")
+    lines.append("=" * 100)
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def format_results_table(summary_rows: list[dict]) -> str:
+    """
+    Format benchmark results as a presentable table for demo purposes.
+
+    Shows key metrics including tokens, time, correctness, and winner for each context size.
+    Highlights the crossover point where RLM starts outperforming baseline.
+    """
+    lines = []
+    lines.append("")
+    lines.append("=" * 120)
+    lines.append("BENCHMARK RESULTS - RLM vs Baseline".center(120))
+    lines.append("=" * 120)
+    lines.append("")
+
+    # Table header
+    lines.append(
+        f"{'Docs':<6} {'Chars':<8} │ "
+        f"{'Baseline':<35} │ {'RLM':<45} │ {'Winner':<20}"
+    )
+    lines.append(
+        f"{'':6} {'':8} │ "
+        f"{'Tokens':>8} {'Time':>6} {'Trunc':>6} {'OK':>4} {'Subcalls':>8} │ "
+        f"{'Tokens':>8} {'Time':>6} {'OK':>4} {'Steps':>6} {'Subcalls':>8} {'Cache':>6} │ "
+        f"{'':<20}"
+    )
+    lines.append("─" * 120)
+
+    # Table rows
+    for row in summary_rows:
+        docs = row["docs"]
+        chars = row["chars"]
+
+        # Baseline metrics
+        b_tokens = row["baseline_tokens"]
+        b_time = row["baseline_elapsed"]
+        b_trunc = "✓" if row["baseline_truncated"] else "✗"
+        b_ok = "✓" if row["baseline_ok"] else "✗"
+        b_subcalls = "-"  # Baseline doesn't use subcalls
+
+        # RLM metrics
+        r_tokens = row["rlm_tokens"]
+        r_time = row["rlm_elapsed"]
+        r_ok = "✓" if row["rlm_ok"] else "✗"
+        r_steps_total = sum(row["rlm_steps"].values()) if row.get("rlm_steps") else 0
+
+        # Extract subcalls and cache info from metrics if available
+        if row.get("rlm_metrics"):
+            r_subcalls = row["rlm_metrics"]["subcalls"]["count"]
+            r_cache = f"{row['rlm_metrics']['cache']['hit_rate']:.0%}"
+        else:
+            r_subcalls = row["rlm_steps"].get("subcall", 0)
+            r_cache = "-"
+
+        # Winner indication
+        winner = row["winner"]
+        if "rlm" in winner.lower():
+            winner_symbol = "🏆 RLM"
+        elif "baseline" in winner.lower():
+            winner_symbol = "🏆 Baseline"
+        else:
+            winner_symbol = "tie"
+
+        lines.append(
+            f"{docs:<6} {chars:<8} │ "
+            f"{b_tokens:>8} {b_time:>6.2f}s {b_trunc:>6} {b_ok:>4} {b_subcalls:>8} │ "
+            f"{r_tokens:>8} {r_time:>6.2f}s {r_ok:>4} {r_steps_total:>6} {r_subcalls:>8} {r_cache:>6} │ "
+            f"{winner_symbol:<20}"
+        )
+
+    lines.append("=" * 120)
+    lines.append("")
+
+    # Summary statistics
+    lines.append("SUMMARY STATISTICS:")
+    lines.append("-" * 120)
+
+    total_tests = len(summary_rows)
+    rlm_wins = sum(1 for r in summary_rows if r["winner"].lower().startswith("rlm") or "🏆 rlm" in r["winner"].lower())
+    baseline_wins = sum(1 for r in summary_rows if r["winner"].lower().startswith("baseline") or "🏆 baseline" in r["winner"].lower())
+    ties = total_tests - rlm_wins - baseline_wins
+
+    lines.append(f"Total tests: {total_tests}")
+    lines.append(f"RLM wins: {rlm_wins} ({rlm_wins/total_tests:.1%})")
+    lines.append(f"Baseline wins: {baseline_wins} ({baseline_wins/total_tests:.1%})")
+    lines.append(f"Ties: {ties}")
+    lines.append("")
+
+    # Token efficiency
+    total_baseline_tokens = sum(r["baseline_tokens"] for r in summary_rows)
+    total_rlm_tokens = sum(r["rlm_tokens"] for r in summary_rows)
+    lines.append(f"Total tokens - Baseline: {total_baseline_tokens:,} | RLM: {total_rlm_tokens:,}")
+
+    if total_baseline_tokens > 0:
+        token_ratio = total_rlm_tokens / total_baseline_tokens
+        lines.append(f"Token efficiency: RLM uses {token_ratio:.2f}x tokens vs baseline")
+
+    # Time efficiency
+    total_baseline_time = sum(r["baseline_elapsed"] for r in summary_rows)
+    total_rlm_time = sum(r["rlm_elapsed"] for r in summary_rows)
+    lines.append(f"Total time - Baseline: {total_baseline_time:.2f}s | RLM: {total_rlm_time:.2f}s")
+
+    lines.append("")
+
+    # Crossover point analysis
+    lines.append("CROSSOVER POINT ANALYSIS:")
+    lines.append("-" * 120)
+
+    truncation_starts = None
+    rlm_starts_winning = None
+
+    for i, row in enumerate(summary_rows):
+        if row["baseline_truncated"] and truncation_starts is None:
+            truncation_starts = i
+        if "rlm" in row["winner"].lower() and rlm_starts_winning is None:
+            rlm_starts_winning = i
+
+    if truncation_starts is not None:
+        row = summary_rows[truncation_starts]
+        lines.append(
+            f"• Baseline starts truncating at {row['docs']} docs ({row['chars']:,} chars)"
+        )
+
+    if rlm_starts_winning is not None:
+        row = summary_rows[rlm_starts_winning]
+        lines.append(
+            f"• RLM starts winning at {row['docs']} docs ({row['chars']:,} chars)"
+        )
+        lines.append(
+            f"  Reason: {row['winner']}"
+        )
+
+    # RLM efficiency metrics
+    if any(r.get("rlm_metrics") for r in summary_rows):
+        lines.append("")
+        lines.append("RLM EFFICIENCY METRICS:")
+        lines.append("-" * 120)
+
+        avg_subcalls = sum(
+            r["rlm_metrics"]["subcalls"]["count"]
+            for r in summary_rows if r.get("rlm_metrics")
+        ) / len([r for r in summary_rows if r.get("rlm_metrics")])
+
+        avg_cache_rate = sum(
+            r["rlm_metrics"]["cache"]["hit_rate"]
+            for r in summary_rows if r.get("rlm_metrics")
+        ) / len([r for r in summary_rows if r.get("rlm_metrics")])
+
+        lines.append(f"• Average subcalls per test: {avg_subcalls:.1f}")
+        lines.append(f"• Average cache hit rate: {avg_cache_rate:.1%}")
+
+    lines.append("=" * 120)
+    lines.append("")
+
+    return "\n".join(lines)
 
 
 def smart_router(
@@ -546,8 +1030,43 @@ def main() -> None:
                 f" tokens={rlm_result['tokens']} calls={rlm_result['calls']}"
                 f" steps={rlm_result['steps']}"
             )
+
+            # Display detailed metrics if available
+            if rlm_result.get("metrics"):
+                m = rlm_result["metrics"]
+                tb = m["token_breakdown"]
+                print(
+                    f"    └─ tokens: prompt={tb['prompt_tokens']} "
+                    f"completion={tb['completion_tokens']} "
+                    f"cache_read={tb['cache_read_tokens']}"
+                )
+                print(
+                    f"    └─ cache: {m['cache']['hits']}/{m['cache']['total_steps']} hits "
+                    f"({m['cache']['hit_rate']:.1%})"
+                )
+                print(
+                    f"    └─ subcalls: {m['subcalls']['count']} calls, "
+                    f"{m['subcalls']['total_tokens']} tokens "
+                    f"(avg {m['subcalls']['avg_tokens_per_subcall']}/call)"
+                )
+                print(
+                    f"    └─ repl: {m['repl']['executions']} execs, "
+                    f"{m['repl']['errors']} errors"
+                )
+
             winner = pick_winner(baseline_result, rlm_result)
             print(f"  winner: {winner}")
+
+            # Display trajectory visualization if enabled (similar to MIT RLM paper Appendix B)
+            show_trajectory = os.getenv("SHOW_TRAJECTORY", "0") == "1"
+            if show_trajectory and rlm_result.get("trace"):
+                print("\n")
+                trajectory_output = format_trajectory(
+                    rlm_result["trace"],
+                    title=f"RLM Trajectory (docs={doc_count})"
+                )
+                print(trajectory_output)
+                print("\n")
 
             summary_rows.append(
                 {
@@ -560,28 +1079,20 @@ def main() -> None:
                     "rlm_tokens": rlm_result["tokens"],
                     "rlm_elapsed": rlm_result["elapsed"],
                     "rlm_ok": is_success(rlm_result["output"]),
+                    "rlm_steps": rlm_result.get("steps", {}),
+                    "rlm_metrics": rlm_result.get("metrics"),
                     "winner": winner,
                 }
             )
 
         if summary_rows:
-            print("Summary:")
-            header = (
-                "docs chars base_tok base_s trunc base_ok rlm_tok rlm_s rlm_ok winner"
-            )
-            print(header)
-            for row in summary_rows:
-                base_tok = row["baseline_tokens"]
-                rlm_tok = row["rlm_tokens"]
-                base_s = row["baseline_elapsed"]
-                rlm_s = row["rlm_elapsed"]
-                print(
-                    f"{row['docs']:>4} {row['chars']:>5} "
-                    f"{base_tok:>7} {base_s:>6.2f} "
-                    f"{str(row['baseline_truncated']):>5} {str(row['baseline_ok']):>7} "
-                    f"{rlm_tok:>7} {rlm_s:>6.2f} {str(row['rlm_ok']):>6} "
-                    f"{row['winner']}"
-                )
+            # Display ASCII plot showing crossover point
+            crossover_plot = plot_crossover_ascii(summary_rows)
+            print(crossover_plot)
+
+            # Display enhanced results table with crossover analysis
+            results_table = format_results_table(summary_rows)
+            print(results_table)
 
 
 if __name__ == "__main__":
