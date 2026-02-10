@@ -85,6 +85,12 @@ USEFUL FOR:
 
 import os
 
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from pyrlm_runtime import Context, ExecutionProfile, RouterConfig, SmartRouter, TraceFormatter
 from pyrlm_runtime.adapters import GenericChatAdapter
 

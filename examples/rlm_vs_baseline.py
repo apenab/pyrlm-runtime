@@ -125,6 +125,12 @@ import sys
 import time
 from collections import Counter
 
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from pyrlm_runtime import Context, Policy, RLM
 from pyrlm_runtime.adapters import GenericChatAdapter
 # We define our own system prompt tailored to the needle-in-haystack task
@@ -1006,8 +1012,12 @@ def main() -> None:
     )
     baseline_query = "What is the key term defined by 'The key term is:'?"
 
+    api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
+
     for model in models:
-        adapter = GenericChatAdapter(base_url=base_url, model=model, timeout=timeout)
+        adapter = GenericChatAdapter(
+            base_url=base_url, model=model, timeout=timeout, api_key=api_key
+        )
         subcall_adapter = None
         subcall_label = "disabled"
         if use_subcall_adapter:
@@ -1016,6 +1026,7 @@ def main() -> None:
                     base_url=subcall_base_url,
                     model=subcall_model,
                     timeout=subcall_timeout,
+                    api_key=api_key,
                 )
                 subcall_label = subcall_model
             else:

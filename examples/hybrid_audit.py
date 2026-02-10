@@ -149,6 +149,12 @@ import random
 import time
 from dataclasses import dataclass
 
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
 from pyrlm_runtime import Context, Policy, RLM
 from pyrlm_runtime.adapters import GenericChatAdapter
 from pyrlm_runtime.prompts import BASE_SYSTEM_PROMPT
