@@ -157,7 +157,12 @@ class GenericChatAdapter(ModelAdapter):
         return ModelResponse(text=content, usage=usage, model_id=self.model)
 
     def _handle_retryable_error(self, error: Exception, attempt: int) -> None:
-        """Log and wait before retrying, or re-raise if retries exhausted."""
+        """Log and wait before retrying; no-op when retries are exhausted.
+
+        When ``attempt < max_retries``, logs a warning and sleeps before the
+        next attempt.  When retries are exhausted the method simply returns,
+        allowing ``complete()`` to re-raise ``last_error``.
+        """
         if attempt >= self.max_retries:
             return
         delay = self._calculate_delay(attempt)
