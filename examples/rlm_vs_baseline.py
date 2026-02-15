@@ -438,13 +438,17 @@ def pick_winner(baseline: dict, rlm: dict) -> str:
 
 
 def export_results(path: str, payload: dict) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    dirpath = os.path.dirname(path)
+    if dirpath:
+        os.makedirs(dirpath, exist_ok=True)
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
 
 
 def export_results_md(path: str, transcript: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    dirpath = os.path.dirname(path)
+    if dirpath:
+        os.makedirs(dirpath, exist_ok=True)
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     file_exists = os.path.exists(path)
     with open(path, "a", encoding="utf-8") as handle:

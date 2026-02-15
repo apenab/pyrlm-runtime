@@ -78,6 +78,47 @@ def test_rlm_with_parallel_subcalls() -> None:
     assert "ans" in output
 
 
+def test_recursive_subcall_uses_configured_repl_backend() -> None:
+    """Regression: recursive subcalls must use the configured REPL backend,
+    not a hardcoded PythonREPL."""
+    from unittest.mock import patch
+
+    from pyrlm_runtime.trace import Trace
+
+    adapter = FakeAdapter(
+        script=[
+            "result = llm_query('summarize')\nanswer = result",
+            "FINAL_VAR: answer",
+        ]
+    )
+
+    context = Context.from_text("test context")
+    runtime = RLM(
+        adapter=adapter,
+        recursive_subcalls=True,
+        max_recursion_depth=2,
+    )
+
+    with patch("pyrlm_runtime.rlm._run_recursive_subcall") as mock_rrs:
+        mock_rrs.return_value = ("mocked-answer", Trace(steps=[]))
+        output, trace = runtime.run("Test", context)
+
+        # The key assertion: create_repl must be passed (not None)
+        assert mock_rrs.called, "_run_recursive_subcall was never called"
+        call_kwargs = mock_rrs.call_args.kwargs
+        assert "create_repl" in call_kwargs, (
+            "create_repl was not passed to _run_recursive_subcall"
+        )
+        assert call_kwargs["create_repl"] is not None, (
+            "create_repl should not be None"
+        )
+        assert call_kwargs["create_repl"] == runtime._create_repl, (
+            "create_repl should be RLM._create_repl"
+        )
+
+    assert output == "mocked-answer"
+
+
 def test_rlm_with_document_context() -> None:
     """Test RLM with document list context."""
     adapter = FakeAdapter(
