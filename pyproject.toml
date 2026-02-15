@@ -1,6 +1,6 @@
 [project]
 name = "pyrlm-runtime"
-version = "0.1.0"
+version = "0.2.0"
 description = "Minimal runtime for Recursive Language Models (RLMs)."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -58,7 +58,7 @@ addopts = "-q"
 
 [tool.commitizen]
 name = "cz_conventional_commits"
-version = "0.1.0"
+version = "0.2.0"
 tag_format = "v$version"
 version_files = [
   "pyproject.toml:version",
