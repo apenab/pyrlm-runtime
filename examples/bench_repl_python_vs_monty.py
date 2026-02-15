@@ -347,9 +347,18 @@ def print_summary(results: list[BenchResult]) -> None:
     total_py = sum(r.python_ms for r in comparable)
     total_mo = sum(r.monty_ms for r in comparable)
     print(f"Total Python: {total_py:.2f}ms | Total Monty: {total_mo:.2f}ms")
-    if total_mo > 0:
-        overall = total_py / total_mo
-        winner = f"Monty is {overall:.1f}x faster" if overall > 1 else f"Python is {1/overall:.1f}x faster"
+    if total_py == 0 and total_mo == 0:
+        print("Overall: No timings recorded")
+    elif total_mo == 0:
+        print("Overall: Monty infinitely faster (Python > 0, Monty ~ 0)")
+    elif total_py == 0:
+        print("Overall: Python has no recorded time; Monty faster")
+    else:
+        ratio = total_py / total_mo
+        if ratio > 1:
+            winner = f"Monty is {ratio:.1f}x faster"
+        else:
+            winner = f"Python is {total_mo / total_py:.1f}x faster"
         print(f"Overall: {winner}")
     print()
 
@@ -397,7 +406,9 @@ class _Tee(io.TextIOBase):
 
 
 def export_results_md(path: str, transcript: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    dirpath = os.path.dirname(path)
+    if dirpath:
+        os.makedirs(dirpath, exist_ok=True)
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     file_exists = os.path.exists(path)
     with open(path, "a", encoding="utf-8") as handle:

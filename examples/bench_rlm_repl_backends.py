@@ -222,7 +222,9 @@ class _Tee(io.TextIOBase):
 
 
 def export_results_md(path: str, transcript: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    dirpath = os.path.dirname(path)
+    if dirpath:
+        os.makedirs(dirpath, exist_ok=True)
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     file_exists = os.path.exists(path)
     with open(path, "a", encoding="utf-8") as handle:

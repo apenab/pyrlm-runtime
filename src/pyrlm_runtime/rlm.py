@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import hashlib
@@ -8,7 +9,7 @@ from pathlib import Path
 from .adapters.base import ModelAdapter
 from .cache import CacheRecord, FileCache
 from .context import Context
-from .env import PythonREPL
+from .env import PythonREPL, REPLProtocol
 from .policy import Policy
 from .prompts import (
     BASE_SYSTEM_PROMPT,
@@ -64,12 +65,17 @@ class RLM:
     # REPL backend: "python" (default) or "monty" (pydantic-monty sandbox)
     repl_backend: str = "python"
 
-    def _create_repl(self) -> PythonREPL:
+    def _create_repl(self) -> REPLProtocol:
+        if self.repl_backend == "python":
+            return PythonREPL()
         if self.repl_backend == "monty":
             from .env_monty import MontyREPL
 
-            return MontyREPL()  # type: ignore[return-value]
-        return PythonREPL()
+            return MontyREPL()
+        raise ValueError(
+            f"Invalid repl_backend={self.repl_backend!r}. "
+            f"Expected 'python' or 'monty'."
+        )
 
     def run(self, query: str, context: Context) -> tuple[str, Trace]:
         logger = self.logger or logging.getLogger("pyrlm_runtime")
@@ -152,6 +158,7 @@ class RLM:
                     max_tokens=max_tokens,
                     depth=depth,
                     logger=logger,
+                    create_repl=self._create_repl,
                 )
                 subcall_made = True
                 # Aggregate usage from sub-trace
@@ -937,6 +944,7 @@ def _run_recursive_subcall(
     max_tokens: int,
     depth: int,
     logger: logging.Logger,
+    create_repl: Callable[[], REPLProtocol] | None = None,
 ) -> tuple[str, Trace]:
     """Run a mini-RLM loop for a recursive subcall.
 
@@ -946,7 +954,7 @@ def _run_recursive_subcall(
     from .prompts import build_root_user_message
 
     trace = Trace(steps=[])
-    repl = PythonREPL()
+    repl = create_repl() if create_repl is not None else PythonREPL()
     sub_context = Context.from_text(text)
 
     repl.set("P", sub_context.text)

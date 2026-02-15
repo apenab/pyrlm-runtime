@@ -470,7 +470,9 @@ def compute_expected(items: list[Item]) -> dict:
 
 
 def write_jsonl(items: list[Item], path: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    dirpath = os.path.dirname(path)
+    if dirpath:
+        os.makedirs(dirpath, exist_ok=True)
     with open(path, "w", encoding="utf-8") as handle:
         for item in items:
             handle.write(

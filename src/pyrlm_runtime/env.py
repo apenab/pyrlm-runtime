@@ -7,7 +7,7 @@ import math
 import re
 import textwrap
 from contextlib import redirect_stdout
-from typing import Any, Dict
+from typing import Any, Dict, Protocol, runtime_checkable
 
 from .context import Context
 
@@ -16,6 +16,15 @@ from .context import Context
 class ExecResult:
     stdout: str
     error: str | None
+
+
+@runtime_checkable
+class REPLProtocol(Protocol):
+    """Common interface for REPL backends (PythonREPL, MontyREPL)."""
+
+    def exec(self, code: str) -> ExecResult: ...
+    def get(self, name: str) -> Any: ...
+    def set(self, name: str, value: Any) -> None: ...
 
 
 class PythonREPL:
