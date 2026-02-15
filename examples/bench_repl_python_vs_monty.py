@@ -453,7 +453,7 @@ def main() -> None:
 
     results: list[BenchResult] = []
     for bench_fn in benchmarks:
-        print(f"  Running: {bench_fn.__doc__.strip()}...", end="", flush=True)
+        print(f"  Running: {(bench_fn.__doc__ or "").strip()}...", end="", flush=True)
         result = bench_fn()
         results.append(result)
         print(f" done ({result.speedup})")

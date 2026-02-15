@@ -6,14 +6,28 @@ from typing import Any, Callable, Dict
 
 from .env import ExecResult
 
+# Primitive types that Monty can handle directly as inputs.
+_MONTY_PRIMITIVES = (str, int, float, bool, type(None))
+
+
+def _is_monty_serializable(value: Any) -> bool:
+    """Check if a value can be passed directly as a Monty input."""
+    if isinstance(value, _MONTY_PRIMITIVES):
+        return True
+    if isinstance(value, (list, tuple)):
+        return all(_is_monty_serializable(v) for v in value)
+    if isinstance(value, dict):
+        return all(
+            isinstance(k, str) and _is_monty_serializable(v)
+            for k, v in value.items()
+        )
+    return False
+
 try:
     from pydantic_monty import (
         Monty,
-        MontyComplete,  # noqa: F401
         MontyError,
-        MontyFutureSnapshot,  # noqa: F401
         MontyRuntimeError,
-        MontySnapshot,  # noqa: F401
         MontySyntaxError,
     )
 
@@ -48,22 +62,79 @@ def _find_assigned_names(code: str) -> list[str]:
         return []
     names: list[str] = []
     for node in ast.iter_child_nodes(tree):
-        target = _extract_target(node)
-        if target is not None:
-            names.append(target)
+        names.extend(_extract_targets(node))
     return names
 
 
-def _extract_target(node: ast.AST) -> str | None:
-    """Return the assigned variable name from an AST node, if any."""
+def _names_from_target(target: ast.AST) -> list[str]:
+    """Recursively extract variable names from an assignment target node."""
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, (ast.Tuple, ast.List)):
+        result: list[str] = []
+        for elt in target.elts:
+            result.extend(_names_from_target(elt))
+        return result
+    if isinstance(target, ast.Starred):
+        return _names_from_target(target.value)
+    return []
+
+
+def _extract_targets(node: ast.AST) -> list[str]:
+    """Return all assigned variable names from an AST node."""
     if isinstance(node, ast.Assign):
-        first = node.targets[0]
-        if isinstance(first, ast.Name):
-            return first.id
-    elif isinstance(node, (ast.AugAssign, ast.For)):
-        if isinstance(node.target, ast.Name):
-            return node.target.id
-    return None
+        names: list[str] = []
+        for target in node.targets:
+            names.extend(_names_from_target(target))
+        return names
+    if isinstance(node, ast.AnnAssign):
+        return _names_from_target(node.target)
+    if isinstance(node, (ast.AugAssign, ast.For)):
+        return _names_from_target(node.target)
+    return []
+
+
+class _MethodCallRewriter(ast.NodeTransformer):
+    """Rewrite ``name.method(args)`` calls to ``name__method(args)`` in the AST.
+
+    This allows LLM code like ``ctx.find("x")`` to be transparently mapped to
+    the external function ``ctx__find("x")`` that Monty can invoke.
+    Attribute accesses that are *not* method calls (e.g. ``ctx.text``) are left
+    untouched so Monty can resolve them on the dataclass input.
+    """
+
+    def __init__(self, name: str, methods: set[str]) -> None:
+        self._name = name
+        self._methods = methods
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:  # noqa: N802
+        self.generic_visit(node)
+        if not isinstance(node.func, ast.Attribute):
+            return node
+        attr: ast.Attribute = node.func
+        if not isinstance(attr.value, ast.Name):
+            return node
+        if attr.value.id != self._name or attr.attr not in self._methods:
+            return node
+        # Replace ctx.method(...) -> ctx__method(...)
+        new_func = ast.Name(id=f"{self._name}__{attr.attr}", ctx=ast.Load())
+        ast.copy_location(new_func, node.func)
+        node.func = new_func
+        return node
+
+
+def _rewrite_method_calls(code: str, name: str, methods: set[str]) -> str:
+    """Rewrite ``name.method(...)`` calls to ``name__method(...)`` in source code."""
+    if not methods:
+        return code
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return code
+    rewriter = _MethodCallRewriter(name, methods)
+    tree = rewriter.visit(tree)
+    ast.fix_missing_locations(tree)
+    return ast.unparse(tree)
 
 
 class MontyREPL:
@@ -94,15 +165,40 @@ class MontyREPL:
         self._limits = limits or MontyLimits()
         self._variables: Dict[str, Any] = {}
         self._external_fns: Dict[str, Callable] = {}
+        self._object_methods: Dict[str, set[str]] = {}
 
     def set(self, name: str, value: Any) -> None:
         if callable(value) and not isinstance(value, (str, int, float, bool, list, dict, tuple)):
             self._external_fns[name] = value
-        else:
+        elif _is_monty_serializable(value):
             self._variables[name] = value
+        else:
+            self._register_object(name, value)
 
     def get(self, name: str) -> Any:
         return self._variables.get(name)
+
+    def _register_object(self, name: str, obj: Any) -> None:
+        """Decompose a complex object into external functions for Monty.
+
+        Passes the object itself as a Monty input (for attribute access like
+        ``ctx.text``) and registers each public method as an external function
+        named ``{name}__{method}``.  At exec time, an AST rewrite transforms
+        ``ctx.method(args)`` into ``ctx__method(args)`` so Monty invokes the
+        external function while plain attribute access remains untouched.
+        """
+        self._variables[name] = obj
+
+        methods: set[str] = set()
+        for attr_name in dir(obj):
+            if attr_name.startswith("_"):
+                continue
+            attr = getattr(obj, attr_name, None)
+            if not callable(attr):
+                continue
+            self._external_fns[f"{name}__{attr_name}"] = attr
+            methods.add(attr_name)
+        self._object_methods[name] = methods
 
     def exec(self, code: str) -> ExecResult:
         if not code.strip():
@@ -142,6 +238,9 @@ class MontyREPL:
 
     def _run_monty(self, code: str, print_callback: Callable) -> Any:
         """Create a Monty instance and execute the code."""
+        for name, methods in self._object_methods.items():
+            code = _rewrite_method_calls(code, name, methods)
+
         input_names = list(self._variables.keys())
         ext_fn_names = list(self._external_fns.keys())
 
