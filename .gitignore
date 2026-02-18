@@ -23,3 +23,4 @@ cache/
 examples/exports/
 
 docs/*.pdf
+.claude
