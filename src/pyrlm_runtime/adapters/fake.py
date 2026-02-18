@@ -26,6 +26,7 @@ class FakeAdapter(ModelAdapter):
     ) -> None:
         self._rules = list(rules or [])
         self._script = list(script or [])
+        self.call_log: list[list[dict[str, str]]] = []
 
     def add_rule(
         self,
@@ -54,6 +55,7 @@ class FakeAdapter(ModelAdapter):
         max_tokens: int = 512,
         temperature: float = 0.0,
     ) -> ModelResponse:
+        self.call_log.append(list(messages))
         prompt = "\n".join(msg.get("content", "") for msg in messages)
 
         for rule in list(self._rules):

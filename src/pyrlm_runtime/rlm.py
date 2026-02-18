@@ -10,12 +10,13 @@ from .adapters.base import ModelAdapter
 from .cache import CacheRecord, FileCache
 from .context import Context
 from .env import PythonREPL, REPLProtocol
-from .policy import Policy
+from .policy import Policy, estimate_tokens
 from .prompts import (
     BASE_SYSTEM_PROMPT,
     SUBCALL_SYSTEM_PROMPT,
     RECURSIVE_SUBCALL_SYSTEM_PROMPT,
     build_root_user_message,
+    build_iteration_message,
 )
 from .trace import Trace, TraceStep
 
@@ -64,6 +65,12 @@ class RLM:
     max_concurrent_subcalls: int = 10
     # REPL backend: "python" (default) or "monty" (pydantic-monty sandbox)
     repl_backend: str = "python"
+    # Multi-turn conversation history (default: enabled).
+    # When True the LLM sees all previous assistant responses and REPL
+    # results, enabling self-correction across iterations.
+    conversation_history: bool = True
+    # Maximum estimated tokens for conversation history (0 = unlimited).
+    max_history_tokens: int = 0
 
     def _create_repl(self) -> REPLProtocol:
         if self.repl_backend == "python":
@@ -73,8 +80,7 @@ class RLM:
 
             return MontyREPL()
         raise ValueError(
-            f"Invalid repl_backend={self.repl_backend!r}. "
-            f"Expected 'python' or 'monty'."
+            f"Invalid repl_backend={self.repl_backend!r}. Expected 'python' or 'monty'."
         )
 
     def run(self, query: str, context: Context) -> tuple[str, Trace]:
@@ -159,13 +165,14 @@ class RLM:
                     depth=depth,
                     logger=logger,
                     create_repl=self._create_repl,
+                    conversation_history=self.conversation_history,
+                    max_history_tokens=self.max_history_tokens,
                 )
                 subcall_made = True
                 # Aggregate usage from sub-trace
-                total_tokens = sum(
-                    s.usage.total_tokens for s in sub_trace.steps if s.usage
-                )
+                total_tokens = sum(s.usage.total_tokens for s in sub_trace.steps if s.usage)
                 from .adapters.base import Usage
+
                 aggregated_usage = Usage(
                     prompt_tokens=0, completion_tokens=0, total_tokens=total_tokens
                 )
@@ -317,17 +324,14 @@ class RLM:
                 max_workers = min(self.max_concurrent_subcalls, len(unique_chunks))
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = {
-                        executor.submit(process_chunk, i, c): i
-                        for i, c in enumerate(unique_chunks)
+                        executor.submit(process_chunk, i, c): i for i, c in enumerate(unique_chunks)
                     }
                     for future in as_completed(futures):
                         idx, result = future.result()
                         unique_results[idx] = result
 
                 # Map results back to original order
-                chunk_to_result = {
-                    c: unique_results[i] for i, c in enumerate(unique_chunks)
-                }
+                chunk_to_result = {c: unique_results[i] for i, c in enumerate(unique_chunks)}
                 return [chunk_to_result[c] or "" for c in prepared]
             else:
                 # Sequential processing (original behavior)
@@ -486,11 +490,7 @@ class RLM:
                 if not cleaned:
                     last_error = "Auto-finalize blocked: empty value."
                     return None
-                if (
-                    cleaned.upper() == "NO_ANSWER"
-                    and self.fallback_code
-                    and not fallback_executed
-                ):
+                if cleaned.upper() == "NO_ANSWER" and self.fallback_code and not fallback_executed:
                     last_error = "Auto-finalize blocked: NO_ANSWER."
                     return None
                 value = cleaned
@@ -557,35 +557,79 @@ class RLM:
                     return False
             return run_fallback("fallback_guard")
 
-        while True:
-            policy.check_step()
-            # Get context metadata for richer user message (paper-aligned)
+        # Initialize conversation history for multi-turn mode
+        if self.conversation_history:
             ctx_meta = context.metadata()
-            user_message = build_root_user_message(
+            initial_user_message = build_root_user_message(
                 query=query,
                 context_len=ctx_meta["total_length"],
                 context_type=ctx_meta["context_type"],
                 num_documents=ctx_meta["num_documents"],
                 document_lengths=ctx_meta.get("document_lengths"),
-                repl_executed=repl_executed,
-                last_stdout=last_stdout,
-                last_error=last_error,
-                step=policy.steps,
+                repl_executed=False,
+                last_stdout=None,
+                last_error=None,
+                step=1,
                 max_steps=policy.max_steps,
             )
-            messages = [
+            history: list[dict[str, str]] = [
                 {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": user_message},
+                {"role": "user", "content": initial_user_message},
             ]
+
+        while True:
+            policy.check_step()
+
+            if self.conversation_history:
+                # From step 2+, append REPL result from the previous iteration
+                if policy.steps > 1:
+                    iter_msg = build_iteration_message(
+                        last_stdout=last_stdout,
+                        last_error=last_error,
+                        step=policy.steps,
+                        max_steps=policy.max_steps,
+                    )
+                    history.append({"role": "user", "content": iter_msg})
+                # Trim history if a token budget is configured
+                if self.max_history_tokens > 0:
+                    history = _trim_history(history, self.max_history_tokens)
+                messages = list(history)  # snapshot for this call
+            else:
+                # Legacy stateless mode: rebuild from scratch each iteration
+                ctx_meta = context.metadata()
+                user_message = build_root_user_message(
+                    query=query,
+                    context_len=ctx_meta["total_length"],
+                    context_type=ctx_meta["context_type"],
+                    num_documents=ctx_meta["num_documents"],
+                    document_lengths=ctx_meta.get("document_lengths"),
+                    repl_executed=repl_executed,
+                    last_stdout=last_stdout,
+                    last_error=last_error,
+                    step=policy.steps,
+                    max_steps=policy.max_steps,
+                )
+                messages = [
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": user_message},
+                ]
+
             logger.debug("root_call step=%s/%s", policy.steps, policy.max_steps)
             response = self.adapter.complete(messages, max_tokens=self.max_tokens, temperature=0.0)
             policy.add_tokens(response.usage.total_tokens)
+
+            # Append assistant response to conversation history
+            if self.conversation_history:
+                history.append({"role": "assistant", "content": response.text})
+
+            # For trace, use the last user message as prompt summary
+            prompt_summary = messages[-1]["content"] if messages else ""
             trace.add(
                 TraceStep(
                     step_id=next_step_id(),
                     kind="root_call",
                     depth=0,
-                    prompt_summary=_truncate(user_message, 240),
+                    prompt_summary=_truncate(prompt_summary, 240),
                     code=_truncate(response.text, 800),
                     usage=response.usage,
                 )
@@ -596,9 +640,7 @@ class RLM:
             final = _parse_final(cleaned)
             has_fence = "```" in cleaned
             final_unfenced = None if has_fence else final
-            logger.debug(
-                "root_call classify final=%s fenced=%s", bool(final_unfenced), has_fence
-            )
+            logger.debug("root_call classify final=%s fenced=%s", bool(final_unfenced), has_fence)
 
             if final_unfenced:
                 if not _can_finalize(
@@ -851,7 +893,7 @@ def _looks_like_code(text: str) -> bool:
         return False
     if first.lower() in {"python", "repl"}:
         return True
-    if first.startswith(("\"\"\"", "'''")):
+    if first.startswith(('"""', "'''")):
         return True
     if "=" in first:
         return True
@@ -921,9 +963,7 @@ def _hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _cache_key(
-    *, text: str, model: str | None, max_tokens: int, recursive: bool = False
-) -> str:
+def _cache_key(*, text: str, model: str | None, max_tokens: int, recursive: bool = False) -> str:
     model_part = model or "default"
     rec_part = "recursive" if recursive else "simple"
     return f"model={model_part}|max_tokens={max_tokens}|mode={rec_part}|text={text}"
@@ -933,6 +973,45 @@ def _truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "...<truncated>"
+
+
+def _trim_history(
+    messages: list[dict[str, str]],
+    max_tokens: int,
+) -> list[dict[str, str]]:
+    """Trim conversation history to fit within a token budget.
+
+    Strategy: always keep messages[0] (system) and messages[1] (initial user
+    message with full context).  Drop oldest middle turns first, keeping the
+    most recent turns.
+    """
+    if max_tokens <= 0 or len(messages) <= 2:
+        return messages
+
+    total = sum(estimate_tokens(m.get("content", "")) for m in messages)
+    if total <= max_tokens:
+        return messages
+
+    preserved_head = messages[:2]
+    tail = messages[2:]
+
+    head_tokens = sum(estimate_tokens(m.get("content", "")) for m in preserved_head)
+    remaining_budget = max_tokens - head_tokens
+    if remaining_budget <= 0:
+        return preserved_head
+
+    # Walk backward through tail, keeping the most recent turns
+    kept: list[dict[str, str]] = []
+    accumulated = 0
+    for msg in reversed(tail):
+        msg_tokens = estimate_tokens(msg.get("content", ""))
+        if accumulated + msg_tokens > remaining_budget:
+            break
+        kept.append(msg)
+        accumulated += msg_tokens
+
+    kept.reverse()
+    return preserved_head + kept
 
 
 def _run_recursive_subcall(
@@ -945,6 +1024,8 @@ def _run_recursive_subcall(
     depth: int,
     logger: logging.Logger,
     create_repl: Callable[[], REPLProtocol] | None = None,
+    conversation_history: bool = True,
+    max_history_tokens: int = 0,
 ) -> tuple[str, Trace]:
     """Run a mini-RLM loop for a recursive subcall.
 
@@ -1004,42 +1085,80 @@ def _run_recursive_subcall(
         return response.text
 
     repl.set("llm_query", simple_subcall)
-    repl.set("ask", lambda q, t, max_tokens=256: simple_subcall(
-        f"Question: {q}\nSnippet:\n{t}", max_toks=max_tokens
-    ))
+    repl.set(
+        "ask",
+        lambda q, t, max_tokens=256: simple_subcall(
+            f"Question: {q}\nSnippet:\n{t}", max_toks=max_tokens
+        ),
+    )
 
     last_stdout: str | None = None
     last_error: str | None = None
     repl_executed = False
 
-    for step in range(max_steps):
-        # Extract the question from the text (format: "Question: ...\nSnippet:\n...")
-        query = "Answer the question based on the provided context."
-        if text.startswith("Question:"):
-            lines = text.split("\n", 1)
-            query = lines[0].replace("Question:", "").strip()
+    # Extract the question from the text (format: "Question: ...\nSnippet:\n...")
+    query = "Answer the question based on the provided context."
+    if text.startswith("Question:"):
+        q_lines = text.split("\n", 1)
+        query = q_lines[0].replace("Question:", "").strip()
 
-        user_message = build_root_user_message(
+    # Initialize conversation history for multi-turn mode
+    if conversation_history:
+        initial_user_msg = build_root_user_message(
             query=query,
             context_len=sub_context.len_chars(),
-            repl_executed=repl_executed,
-            last_stdout=last_stdout,
-            last_error=last_error,
-            step=step + 1,
+            repl_executed=False,
+            last_stdout=None,
+            last_error=None,
+            step=1,
             max_steps=max_steps,
         )
-        messages = [
+        sub_history: list[dict[str, str]] = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
+            {"role": "user", "content": initial_user_msg},
         ]
+
+    for step in range(max_steps):
+        if conversation_history:
+            if step > 0:
+                iter_msg = build_iteration_message(
+                    last_stdout=last_stdout,
+                    last_error=last_error,
+                    step=step + 1,
+                    max_steps=max_steps,
+                )
+                sub_history.append({"role": "user", "content": iter_msg})
+            if max_history_tokens > 0:
+                sub_history = _trim_history(sub_history, max_history_tokens)
+            messages = list(sub_history)
+        else:
+            user_message = build_root_user_message(
+                query=query,
+                context_len=sub_context.len_chars(),
+                repl_executed=repl_executed,
+                last_stdout=last_stdout,
+                last_error=last_error,
+                step=step + 1,
+                max_steps=max_steps,
+            )
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ]
+
         logger.debug("recursive_subcall step=%s/%s depth=%s", step + 1, max_steps, depth)
         response = adapter.complete(messages, max_tokens=max_tokens, temperature=0.0)
+
+        if conversation_history:
+            sub_history.append({"role": "assistant", "content": response.text})
+
+        prompt_summary = messages[-1]["content"] if messages else ""
         trace.add(
             TraceStep(
                 step_id=next_step_id(),
                 kind="root_call",
                 depth=depth,
-                prompt_summary=_truncate(user_message, 240),
+                prompt_summary=_truncate(prompt_summary, 240),
                 code=_truncate(response.text, 800),
                 usage=response.usage,
             )
