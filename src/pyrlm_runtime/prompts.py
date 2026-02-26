@@ -226,6 +226,6 @@ def build_iteration_message(
     messages only carry the REPL execution results and the step counter to
     avoid duplicating the query and context metadata on every turn.
     """
-    stdout = last_stdout or "(none)"
-    error = last_error or "(none)"
+    stdout = last_stdout or "<none>"
+    error = last_error or "<none>"
     return f"[REPL Result]\nstdout:\n{stdout}\n\nerror:\n{error}\n\nStep: {step}/{max_steps}"

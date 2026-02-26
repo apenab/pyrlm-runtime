@@ -259,3 +259,37 @@ def test_recursive_subcall_accepts_conversation_history_params() -> None:
     # Verify defaults
     assert sig.parameters["conversation_history"].default is True
     assert sig.parameters["max_history_tokens"].default == 0
+
+
+def test_trim_history_preserves_role_alternation() -> None:
+    """Regression: _trim_history must keep (assistant, user) pairs so role
+    alternation is never broken by partial trimming."""
+    from pyrlm_runtime.rlm import _trim_history
+
+    msgs = [
+        {"role": "system", "content": "s"},
+        {"role": "user", "content": "initial user message"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a2"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a3"},
+        {"role": "user", "content": "u3"},
+    ]
+    # Budget that fits head + only the last pair, not all of tail
+    # estimate_tokens counts chars/4; head ≈ (1+20)/4 ≈ 5 tokens
+    # Each tail message ≈ 1 token → pair ≈ 2 tokens
+    # Set budget so only 1 pair from tail fits after head
+    trimmed = _trim_history(msgs, max_tokens=8)
+
+    # Must always start with system, user
+    assert trimmed[0]["role"] == "system"
+    assert trimmed[1]["role"] == "user"
+
+    # Verify strict role alternation after the head
+    for i in range(2, len(trimmed)):
+        expected = "assistant" if i % 2 == 0 else "user"
+        assert trimmed[i]["role"] == expected, (
+            f"Role alternation broken at index {i}: expected {expected}, "
+            f"got {trimmed[i]['role']}"
+        )

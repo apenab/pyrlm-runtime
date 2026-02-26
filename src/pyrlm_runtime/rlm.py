@@ -1000,15 +1000,22 @@ def _trim_history(
     if remaining_budget <= 0:
         return preserved_head
 
-    # Walk backward through tail, keeping the most recent turns
+    # Walk backward through tail in (assistant, user) pairs to preserve
+    # role alternation.  tail starts with an assistant message and alternates
+    # assistant, user, assistant, user, ...
     kept: list[dict[str, str]] = []
     accumulated = 0
-    for msg in reversed(tail):
-        msg_tokens = estimate_tokens(msg.get("content", ""))
-        if accumulated + msg_tokens > remaining_budget:
+    i = len(tail) - 1
+    while i >= 1:
+        pair = [tail[i - 1], tail[i]]
+        pair_tokens = sum(estimate_tokens(m.get("content", "")) for m in pair)
+        if accumulated + pair_tokens > remaining_budget:
             break
-        kept.append(msg)
-        accumulated += msg_tokens
+        # Append in reverse order; kept.reverse() below restores proper order
+        kept.append(pair[1])
+        kept.append(pair[0])
+        accumulated += pair_tokens
+        i -= 2
 
     kept.reverse()
     return preserved_head + kept
