@@ -200,10 +200,7 @@ def build_root_user_message(
             f"Document lengths: {lengths_str}\n"
         )
     else:
-        context_info = (
-            f"Context type: {context_type}\n"
-            f"Total length: {context_len} chars\n"
-        )
+        context_info = f"Context type: {context_type}\nTotal length: {context_len} chars\n"
 
     return (
         f"Query:\n{query}\n\n"
@@ -213,3 +210,22 @@ def build_root_user_message(
         f"Last REPL stdout:\n{stdout}\n\n"
         f"Last REPL error:\n{error}"
     )
+
+
+def build_iteration_message(
+    *,
+    last_stdout: str | None,
+    last_error: str | None,
+    step: int,
+    max_steps: int,
+) -> str:
+    """Build a lightweight user message for subsequent RLM iterations.
+
+    In conversation_history mode, the query and context metadata are already
+    present in the initial user message (messages[1]).  Subsequent iteration
+    messages only carry the REPL execution results and the step counter to
+    avoid duplicating the query and context metadata on every turn.
+    """
+    stdout = last_stdout or "<none>"
+    error = last_error or "<none>"
+    return f"[REPL Result]\nstdout:\n{stdout}\n\nerror:\n{error}\n\nStep: {step}/{max_steps}"

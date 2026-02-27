@@ -38,6 +38,7 @@ tests/
 - Quote style: double quotes
 - Type hints: use `from __future__ import annotations` in all files
 - Commit messages: conventional commits (`feat:`, `fix:`, `refactor:`, etc.)
+- **Never** add `Co-Authored-By` lines to commits
 
 ## Testing conventions
 
