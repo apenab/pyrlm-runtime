@@ -1,41 +1,39 @@
 #!/usr/bin/env python3
 """
 Three-way Oolong benchmark: baseline vs rlm-minimal vs pyrlm-runtime.
+VERTEX AI VERSION - uses Google Cloud Vertex AI Gemini models.
 
 This script reuses Oolong datasets ("oolongbench/oolong-synth" or "oolongbench/oolong-real")
 and mirrors Oolong-style scoring while evaluating three execution strategies:
 1) baseline single-shot prompt
-2) rlm-minimal REPL loop
+2) rlm-minimal REPL loop (external library)
 3) pyrlm-runtime agentic loop
 
-Usage:
-  uv run python examples/oolong_three_way_benchmark.py \
-    --model qwen2.5-coder:14b-instruct \
-    --dataset synth \
-    --base-url http://127.0.0.1:11434/v1 \
-    --max-examples 30
+Prerequisites:
+  - GCP authentication: gcloud auth application-default login
+  - Project access: go-agl-poc-radax-p01-poc
+  - Permissions: roles/aiplatform.user
 
-Standard reproducible run:
-  cd /home/apenab/projects/rlm-runtime && \
-  HF_TOKEN=hf_tu_token \
-  uv run python examples/oolong_three_way_benchmark.py \
-    --model qwen2.5-coder:14b-instruct \
+Usage:
+  uv run python examples/oolong_three_way_benchmark_vertex.py \
+    --model gemini-2.5-pro \
+    --project-id go-agl-poc-radax-p01-poc \
     --dataset synth \
-    --sample-strategy stratified \
-    --seed 42 \
-    --max-examples 100 \
-    --baseline-max-tokens 1024 \
-    --agent-max-tokens 2048 \
-    --agent-subcall-max-tokens 2048 \
-    --base-url http://127.0.0.1:11434/v1
+    --max-examples 30 \
+    --log-level INFO \
+    --save-prompts
+
+Quick test:
+  uv run python examples/oolong_three_way_benchmark_vertex.py \
+    --max-examples 1 --log-level DEBUG
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
-import io
 import json
+import logging
 import math
 import os
 import random
@@ -51,9 +49,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Import Vertex AI adapters
 from pyrlm_runtime import Context, Policy, RLM
-from pyrlm_runtime.adapters import GenericChatAdapter
+from pyrlm_runtime.adapters.vertex_ai import VertexAIAdapter
 from pyrlm_runtime.prompts import BASE_SYSTEM_PROMPT, SUBCALL_SYSTEM_PROMPT
+from vertex_adapter_for_rlm_minimal import InstrumentedVertexAIClient
+
+# Import external rlm-minimal library
+from rlm.rlm_repl import RLM_REPL
 
 
 def usage_total(response: Any) -> int:
@@ -213,30 +216,81 @@ def dnd_process_response(datapoint: dict[str, Any], output: str, model: str) -> 
     }
 
 
-def openrouter_payload_builder(
-    messages: list[dict[str, str]],
-    max_tokens: int,
-    temperature: float,
-    model: str | None,
-) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-    }
-    if model:
-        payload["model"] = model
-    return payload
+def setup_logging(run_dir: Path, log_level: str) -> logging.Logger:
+    """Configure comprehensive logging for the benchmark.
+
+    Args:
+        run_dir: Directory to store execution.log
+        log_level: Desired console log level (DEBUG/INFO/WARNING/ERROR)
+
+    Returns:
+        Logger instance for the benchmark
+    """
+    log_file = run_dir / "execution.log"
+
+    # Console handler with colors
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(getattr(logging, log_level))
+    console_formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    console_handler.setFormatter(console_formatter)
+
+    # File handler - always DEBUG level
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s"
+    )
+    file_handler.setFormatter(file_formatter)
+
+    # Root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    root_logger.addHandler(console_handler)
+    root_logger.addHandler(file_handler)
+
+    benchmark_logger = logging.getLogger("oolong_benchmark")
+    benchmark_logger.info(f"Logging configured: console={log_level}, file=DEBUG")
+    benchmark_logger.info(f"Log file: {log_file}")
+
+    return benchmark_logger
 
 
 def run_baseline(
-    adapter: GenericChatAdapter,
+    adapter: VertexAIAdapter,
     context_text: str,
     question: str,
     *,
     max_tokens: int,
     temperature: float,
-) -> tuple[str, int, float, str | None]:
+    logger: logging.Logger,
+    save_prompts: bool = False,
+    prompts_dir: Path | None = None,
+    example_id: str = "",
+    latency_breakdown: bool = False,
+) -> tuple[str, int, float, str | None, dict[str, Any]]:
+    """Run baseline single-shot prompt.
+
+    Args:
+        adapter: VertexAI ada pter instance
+        context_text: Full context text
+        question: Question to answer
+        max_tokens: Maximum tokens to generate
+        temperature: Sampling temperature
+        logger: Logger instance
+        save_prompts: Whether to save prompts to files
+        prompts_dir: Directory to save prompts
+        example_id: ID for logging/filenames
+        latency_breakdown: Whether to track detailed latencies
+
+    Returns:
+        Tuple of (output, tokens, elapsed, error, metadata)
+    """
+    timing = {"start": time.time()}
+
+    # Build messages
     messages = [
         {
             "role": "system",
@@ -253,208 +307,144 @@ def run_baseline(
             ),
         },
     ]
-    start = time.time()
+    timing["messages_built"] = time.time()
+
+    # Save prompts if enabled
+    if save_prompts and prompts_dir:
+        prompt_file = prompts_dir / f"{example_id}_baseline_prompt.json"
+        write_json(prompt_file, {"messages": messages, "max_tokens": max_tokens, "temperature": temperature})
+        logger.debug(f"[BASELINE] Saved prompt to {prompt_file}")
+
+    # Call LLM
+    logger.info(f"[BASELINE] Calling LLM for {example_id} (context_len={len(context_text)})")
+    timing["before_llm"] = time.time()
+
     try:
         resp = adapter.complete(messages, max_tokens=max_tokens, temperature=temperature)
-        return resp.text or "", usage_total(resp), time.time() - start, None
+        timing["after_llm"] = time.time()
+
+        tokens = usage_total(resp)
+        output = resp.text or ""
+
+        # Calculate latencies
+        metadata: dict[str, Any] = {}
+        if latency_breakdown:
+            metadata["latency_phases"] = {
+                "message_prep": timing["messages_built"] - timing["start"],
+                "llm_call": timing["after_llm"] - timing["before_llm"],
+                "total": timing["after_llm"] - timing["start"],
+            }
+
+        if save_prompts:
+            metadata["prompt_file"] = str(prompt_file) if prompts_dir else None
+
+        elapsed = timing["after_llm"] - timing["start"]
+        logger.info(f"[BASELINE] Completed {example_id}: {tokens} tokens, {elapsed:.2f}s")
+
+        return output, tokens, elapsed, None, metadata
+
     except Exception as exc:
-        return "", 0, time.time() - start, str(exc)
+        elapsed = time.time() - timing["start"]
+        logger.error(f"[BASELINE] Error for {example_id}: {exc}", exc_info=True)
+        return "", 0, elapsed, str(exc), {}
 
 
-def run_rlm_minimal(
-    root_adapter: GenericChatAdapter,
-    sub_adapter: GenericChatAdapter,
+def run_rlm_minimal_external(
+    root_client: InstrumentedVertexAIClient,
+    sub_client: InstrumentedVertexAIClient,
     context_text: str,
     question: str,
     *,
-    max_tokens: int,
-    subcall_tokens: int,
-    temperature: float,
     max_iterations: int,
-) -> tuple[str, int, float, str | None, list[dict[str, Any]]]:
-    safe_builtins = {
-        "print": print,
-        "len": len,
-        "str": str,
-        "int": int,
-        "float": float,
-        "list": list,
-        "dict": dict,
-        "set": set,
-        "tuple": tuple,
-        "bool": bool,
-        "type": type,
-        "isinstance": isinstance,
-        "enumerate": enumerate,
-        "zip": zip,
-        "map": map,
-        "filter": filter,
-        "sorted": sorted,
-        "min": min,
-        "max": max,
-        "sum": sum,
-        "abs": abs,
-        "round": round,
-        "repr": repr,
-        "range": range,
-        "iter": iter,
-        "next": next,
-        "__import__": __import__,
-        "Exception": Exception,
-        "ValueError": ValueError,
-        "TypeError": TypeError,
-        "KeyError": KeyError,
-        "IndexError": IndexError,
-        "AttributeError": AttributeError,
-        "RuntimeError": RuntimeError,
-    }
-    repl_globals: dict[str, Any] = {"__builtins__": safe_builtins}
-    repl_locals: dict[str, Any] = {"context": context_text}
-    total_tokens = 0
-    debug_events: list[dict[str, Any]] = []
+    logger: logging.Logger,
+    save_prompts: bool = False,
+    prompts_dir: Path | None = None,
+    example_id: str = "",
+    latency_breakdown: bool = False,
+) -> tuple[str, int, float, str | None, dict[str, Any]]:
+    """Run rlm-minimal using external library.
 
-    def llm_query(prompt: str) -> str:
-        nonlocal total_tokens
-        msgs = [{"role": "user", "content": prompt}]
-        resp = sub_adapter.complete(msgs, max_tokens=subcall_tokens, temperature=temperature)
-        used = usage_total(resp)
-        total_tokens += used
-        debug_events.append(
-            {
-                "type": "subcall",
-                "prompt_chars": len(prompt),
-                "response_chars": len(resp.text),
-                "tokens": used,
-            }
-        )
-        return resp.text
+    Args:
+        root_client: Instrumented Vertex AI client for root calls
+        sub_client: Instrumented Vertex AI client for subcalls
+        context_text: Full context text
+        question: Question to answer
+        max_iterations: Maximum REPL iterations
+        logger: Logger instance
+        save_prompts: Whether to save prompts (best effort)
+        prompts_dir: Directory to save prompts
+        example_id: ID for logging/filenames
+        latency_breakdown: Whether to track detailed latencies
 
-    repl_globals["llm_query"] = llm_query
+    Returns:
+        Tuple of (output, tokens, elapsed, error, metadata)
+    """
+    timing = {"start": time.time()}
 
-    def _exec_code(code: str) -> tuple[str, str | None]:
-        buf = io.StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = buf
-        err: str | None = None
-        try:
-            ns = {**repl_globals, **repl_locals}
-            exec(code, ns, ns)  # noqa: S102
-            for k, v in ns.items():
-                if k not in repl_globals:
-                    repl_locals[k] = v
-        except Exception as exc:
-            err = str(exc)
-        finally:
-            sys.stdout = old_stdout
-        return buf.getvalue(), err
+    # Reset client metrics
+    root_client.reset_metrics()
+    sub_client.reset_metrics()
 
-    def _find_code_blocks(text: str) -> list[str]:
-        blocks: list[str] = []
-        blocks.extend(re.findall(r"```repl\s*\n(.*?)\n```", text, re.DOTALL))
-        blocks.extend(re.findall(r"```python\s*\n(.*?)\n```", text, re.DOTALL))
-        return [b for b in blocks if b.strip()]
-
-    def _find_final_answer(text: str) -> tuple[str, str] | None:
-        m = re.search(r"^\s*FINAL_VAR\((.*?)\)", text, re.MULTILINE)
-        if m:
-            return "FINAL_VAR", m.group(1).strip()
-        m = re.search(r"^\s*FINAL\((.*?)\)", text, re.MULTILINE | re.DOTALL)
-        if m:
-            return "FINAL", m.group(1).strip()
-        m = re.search(r"^\s*FINAL\s*:\s*(.+)$", text, re.MULTILINE)
-        if m:
-            return "FINAL", m.group(1).strip()
-        return None
-
-    system_prompt = (
-        "You are in a REPL loop with variable `context` containing the full context and "
-        "`llm_query(prompt)` for subcalls.\n"
-        "Goal: answer the question exactly.\n"
-        "Respond with REPL code blocks and finish with FINAL(...) or FINAL_VAR(...).\n"
-        "Prefer deterministic extraction from `context` when possible."
-    )
-    messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
-    start = time.time()
+    # Create RLM_REPL with injected clients
+    logger.info(f"[RLM_MINIMAL] Starting for {example_id} (context_len={len(context_text)})")
 
     try:
-        for i in range(max_iterations):
-            user_msg = (
-                f"Question: {question}\n"
-                "If not done, write code in ```python``` or ```repl```.\n"
-                "If done, output FINAL(...) or FINAL_VAR(...)."
-            )
-            call_messages = messages + [{"role": "user", "content": user_msg}]
-            resp = root_adapter.complete(call_messages, max_tokens=max_tokens, temperature=temperature)
-            root_tokens = usage_total(resp)
-            total_tokens += root_tokens
-            text = resp.text or ""
-            debug_events.append(
-                {
-                    "type": "root_call",
-                    "iteration": i + 1,
-                    "response_chars": len(text),
-                    "tokens": root_tokens,
-                }
-            )
-            messages.append({"role": "assistant", "content": text})
-
-            final = _find_final_answer(text)
-            if final:
-                kind, content = final
-                if kind == "FINAL":
-                    return content.strip(), total_tokens, time.time() - start, None, debug_events
-                var_name = content.strip().strip("\"").strip("'")
-                return (
-                    str(repl_locals.get(var_name, f"(variable '{var_name}' not found)")),
-                    total_tokens,
-                    time.time() - start,
-                    None,
-                    debug_events,
-                )
-
-            code_blocks = _find_code_blocks(text)
-            if not code_blocks:
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": "No executable code found. Provide code or FINAL(...).",
-                    }
-                )
-                continue
-
-            for idx, code in enumerate(code_blocks, start=1):
-                stdout, stderr = _exec_code(code)
-                debug_events.append(
-                    {
-                        "type": "repl_exec",
-                        "iteration": i + 1,
-                        "block_index": idx,
-                        "code": code,
-                        "stdout": stdout,
-                        "stderr": stderr,
-                    }
-                )
-                output = stdout or "(no output)"
-                if stderr:
-                    output += f"\nError: {stderr}"
-                if len(output) > 120000:
-                    output = output[:120000] + "..."
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": f"Code output:\n{output}",
-                    }
-                )
-
-        resp = root_adapter.complete(
-            messages + [{"role": "user", "content": "Return final answer now using FINAL(...)"}],
-            max_tokens=max_tokens,
-            temperature=temperature,
+        rlm = RLM_REPL(
+            api_key=None,  # Not used with injected clients
+            model="gemini-2.5-pro",  # Model name for metadata
+            recursive_model="gemini-2.5-pro",
+            max_iterations=max_iterations,
+            enable_logging=False,  # Disable internal colorful logging
+            client=root_client,  # Inject Vertex AI client
+            recursive_client=sub_client,  # Inject Vertex AI subcall client
         )
-        total_tokens += usage_total(resp)
-        return resp.text or "", total_tokens, time.time() - start, None, debug_events
+        timing["rlm_init"] = time.time()
+
+        # Call completion
+        output = rlm.completion(context=context_text, query=question)
+        timing["rlm_complete"] = time.time()
+
+        # Collect metrics from instrumented clients
+        total_tokens = root_client.total_tokens_used + sub_client.total_tokens_used
+        elapsed = timing["rlm_complete"] - timing["start"]
+
+        # Build metadata
+        metadata: dict[str, Any] = {
+            "root_calls": root_client.call_count,
+            "subcalls": sub_client.call_count,
+            "root_tokens": root_client.total_tokens_used,
+            "sub_tokens": sub_client.total_tokens_used,
+        }
+
+        if latency_breakdown:
+            metadata["latency_phases"] = {
+                "rlm_init": timing["rlm_init"] - timing["start"],
+                "rlm_execution": timing["rlm_complete"] - timing["rlm_init"],
+                "total": elapsed,
+            }
+            metadata["root_call_log"] = root_client.call_log
+            metadata["sub_call_log"] = sub_client.call_log
+
+        logger.info(
+            f"[RLM_MINIMAL] Completed {example_id}: {total_tokens} tokens "
+            f"({root_client.call_count} root + {sub_client.call_count} sub), {elapsed:.2f}s"
+        )
+
+        return output, total_tokens, elapsed, None, metadata
+
     except Exception as exc:
-        return "", total_tokens, time.time() - start, str(exc), debug_events
+        elapsed = time.time() - timing["start"]
+        logger.error(f"[RLM_MINIMAL] Error for {example_id}: {exc}", exc_info=True)
+
+        # Still collect partial metrics
+        total_tokens = root_client.total_tokens_used + sub_client.total_tokens_used
+        metadata = {
+            "root_calls": root_client.call_count,
+            "subcalls": sub_client.call_count,
+            "partial": True,
+        }
+
+        return "", total_tokens, elapsed, str(exc), metadata
 
 
 def summarize_trace_steps(trace: Any) -> dict[str, int]:
@@ -467,8 +457,8 @@ def summarize_trace_steps(trace: Any) -> dict[str, int]:
 
 
 def run_pyrlm(
-    root_adapter: GenericChatAdapter,
-    sub_adapter: GenericChatAdapter,
+    root_adapter: VertexAIAdapter,
+    sub_adapter: VertexAIAdapter,
     context_text: str,
     question: str,
     *,
@@ -476,8 +466,38 @@ def run_pyrlm(
     subcall_tokens: int,
     max_steps: int,
     max_subcalls: int,
-) -> tuple[str, int, float, str | None, dict[str, int]]:
+    logger: logging.Logger,
+    save_prompts: bool = False,
+    prompts_dir: Path | None = None,
+    example_id: str = "",
+    latency_breakdown: bool = False,
+) -> tuple[str, int, float, str | None, dict[str, Any]]:
+    """Run pyrlm_runtime with logging.
+
+    Args:
+        root_adapter: VertexAI adapter for root calls
+        sub_adapter: VertexAI adapter for subcalls
+        context_text: Full context text
+        question: Question to answer
+        max_tokens: Max tokens for root calls
+        subcall_tokens: Max tokens for subcalls
+        max_steps: Max RLM steps
+        max_subcalls: Max subcalls
+        logger: Logger instance
+        save_prompts: Whether to save prompts (best effort via trace)
+        prompts_dir: Directory to save prompts
+        example_id: ID for logging/filenames
+        latency_breakdown: Whether to track detailed latencies
+
+    Returns:
+        Tuple of (output, tokens, elapsed, error, metadata)
+    """
+    timing = {"start": time.time()}
+
+    logger.info(f"[PYRLM] Starting for {example_id} (context_len={len(context_text)})")
+
     context = Context.from_text(context_text)
+
     rlm = RLM(
         adapter=root_adapter,
         subcall_adapter=sub_adapter,
@@ -495,17 +515,65 @@ def run_pyrlm(
         max_concurrent_subcalls=20,
         conversation_history=True,
     )
+    timing["rlm_init"] = time.time()
 
-    start = time.time()
     trace = None
     try:
         output, trace = rlm.run(question, context)
+        timing["rlm_complete"] = time.time()
+
         tokens = 0
         if trace is not None:
             tokens = sum((s.usage.total_tokens for s in trace.steps if s.usage), 0)
-        return output or "", tokens, time.time() - start, None, summarize_trace_steps(trace)
+
+        elapsed = timing["rlm_complete"] - timing["start"]
+        trace_steps_summary = summarize_trace_steps(trace)
+
+        # Build metadata
+        metadata: dict[str, Any] = {"trace_steps": trace_steps_summary}
+
+        if latency_breakdown:
+            metadata["latency_phases"] = {
+                "rlm_init": timing["rlm_init"] - timing["start"],
+                "rlm_execution": timing["rlm_complete"] - timing["rlm_init"],
+                "total": elapsed,
+            }
+
+        # Save trace if requested
+        if save_prompts and prompts_dir and trace:
+            trace_file = prompts_dir / f"{example_id}_pyrlm_trace.json"
+            try:
+                trace_data = {
+                    "steps": [
+                        {
+                            "kind": s.kind,
+                            "tokens": s.usage.total_tokens if s.usage else 0,
+                            "error": s.error,
+                        }
+                        for s in trace.steps
+                    ]
+                }
+                write_json(trace_file, trace_data)
+                metadata["trace_file"] = str(trace_file)
+            except Exception as trace_exc:
+                logger.warning(f"Could not save trace: {trace_exc}")
+
+        logger.info(
+            f"[PYRLM] Completed {example_id}: {tokens} tokens, "
+            f"{trace_steps_summary}, {elapsed:.2f}s"
+        )
+
+        return output or "", tokens, elapsed, None, metadata
+
     except Exception as exc:
-        return "", 0, time.time() - start, str(exc), summarize_trace_steps(trace)
+        elapsed = time.time() - timing["start"]
+        logger.error(f"[PYRLM] Error for {example_id}: {exc}", exc_info=True)
+
+        tokens = 0
+        if trace is not None:
+            tokens = sum((s.usage.total_tokens for s in trace.steps if s.usage), 0)
+
+        return "", tokens, elapsed, str(exc), {"trace_steps": summarize_trace_steps(trace)}
 
 
 def score_output(dataset_kind: str, datapoint: dict[str, Any], output: str, model: str) -> dict[str, Any]:
@@ -705,12 +773,9 @@ def write_markdown_summary(path: Path, summary: dict[str, Any], by_bucket: dict[
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", choices=["synth", "real"], default="synth")
-    parser.add_argument("--model", required=True)
-    parser.add_argument("--base-url", default=os.getenv("LLM_BASE_URL", "http://127.0.0.1:11434/v1"))
-    parser.add_argument(
-        "--api-key",
-        default=os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY") or "",
-    )
+    parser.add_argument("--model", default="gemini-2.5-pro")
+    parser.add_argument("--project-id", default="go-agl-poc-radax-p01-poc")
+    parser.add_argument("--location", default="us-central1")
     parser.add_argument("--max-examples", type=int, default=100)
     parser.add_argument(
         "--sample-strategy",
@@ -729,6 +794,22 @@ def main() -> None:
     parser.add_argument("--rlm-max-steps", type=int, default=35)
     parser.add_argument("--rlm-max-subcalls", type=int, default=250)
     parser.add_argument("--minimal-max-iterations", type=int, default=20)
+    parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default="INFO",
+        help="Logging level (DEBUG for verbose output)",
+    )
+    parser.add_argument(
+        "--save-prompts",
+        action="store_true",
+        help="Save all prompts and traces to files",
+    )
+    parser.add_argument(
+        "--latency-breakdown",
+        action="store_true",
+        help="Include detailed latency metrics per phase",
+    )
     args = parser.parse_args()
 
     try:
@@ -767,40 +848,59 @@ def main() -> None:
     )
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    base_adapter = GenericChatAdapter(
-        base_url=args.base_url,
+    # Setup logging
+    logger = setup_logging(run_dir, args.log_level)
+    logger.info(f"Benchmark started: {args.dataset} dataset, model={args.model}")
+    logger.info(f"Project: {args.project_id}, Location: {args.location}")
+    logger.info(f"Results will be saved to: {run_dir}")
+
+    # Create prompts directory if needed
+    prompts_dir = None
+    if args.save_prompts:
+        prompts_dir = run_dir / "prompts"
+        prompts_dir.mkdir(exist_ok=True)
+        logger.info(f"Prompts will be saved to: {prompts_dir}")
+
+    # Create Vertex AI adapters
+    logger.info("Initializing Vertex AI adapters...")
+
+    # Baseline adapter
+    base_adapter = VertexAIAdapter(
+        project_id=args.project_id,
+        location=args.location,
         model=args.model,
-        api_key=args.api_key,
         timeout=900,
-        payload_builder=openrouter_payload_builder,
+        logger_instance=logger,
     )
-    min_root = GenericChatAdapter(
-        base_url=args.base_url,
+
+    # RLM-minimal adapters (instrumented for metrics)
+    min_root = InstrumentedVertexAIClient(
+        project_id=args.project_id,
+        location=args.location,
         model=args.model,
-        api_key=args.api_key,
-        timeout=900,
-        payload_builder=openrouter_payload_builder,
+        logger_instance=logger,
     )
-    min_sub = GenericChatAdapter(
-        base_url=args.base_url,
+    min_sub = InstrumentedVertexAIClient(
+        project_id=args.project_id,
+        location=args.location,
         model=args.model,
-        api_key=args.api_key,
-        timeout=900,
-        payload_builder=openrouter_payload_builder,
+        logger_instance=logger,
     )
-    py_root = GenericChatAdapter(
-        base_url=args.base_url,
+
+    # PyRLM adapters
+    py_root = VertexAIAdapter(
+        project_id=args.project_id,
+        location=args.location,
         model=args.model,
-        api_key=args.api_key,
         timeout=900,
-        payload_builder=openrouter_payload_builder,
+        logger_instance=logger,
     )
-    py_sub = GenericChatAdapter(
-        base_url=args.base_url,
+    py_sub = VertexAIAdapter(
+        project_id=args.project_id,
+        location=args.location,
         model=args.model,
-        api_key=args.api_key,
         timeout=900,
-        payload_builder=openrouter_payload_builder,
+        logger_instance=logger,
     )
 
     rows: list[dict[str, Any]] = []
@@ -815,24 +915,31 @@ def main() -> None:
         example_id = dp["id"]
         print(f"[{i + 1}/{len(data)}] id={example_id} ctx_len={dp['context_len']}")
 
-        b_out, b_tok, b_s, b_err = run_baseline(
+        b_out, b_tok, b_s, b_err, b_meta = run_baseline(
             base_adapter,
             context_text,
             question,
             max_tokens=baseline_max_tokens,
             temperature=args.temperature,
+            logger=logger,
+            save_prompts=args.save_prompts,
+            prompts_dir=prompts_dir,
+            example_id=example_id,
+            latency_breakdown=args.latency_breakdown,
         )
-        m_out, m_tok, m_s, m_err, m_trace = run_rlm_minimal(
+        m_out, m_tok, m_s, m_err, m_meta = run_rlm_minimal_external(
             min_root,
             min_sub,
             context_text,
             question,
-            max_tokens=agent_max_tokens,
-            subcall_tokens=agent_subcall_max_tokens,
-            temperature=args.temperature,
             max_iterations=args.minimal_max_iterations,
+            logger=logger,
+            save_prompts=args.save_prompts,
+            prompts_dir=prompts_dir,
+            example_id=example_id,
+            latency_breakdown=args.latency_breakdown,
         )
-        p_out, p_tok, p_s, p_err, p_steps = run_pyrlm(
+        p_out, p_tok, p_s, p_err, p_meta = run_pyrlm(
             py_root,
             py_sub,
             context_text,
@@ -841,12 +948,17 @@ def main() -> None:
             subcall_tokens=agent_subcall_max_tokens,
             max_steps=args.rlm_max_steps,
             max_subcalls=args.rlm_max_subcalls,
+            logger=logger,
+            save_prompts=args.save_prompts,
+            prompts_dir=prompts_dir,
+            example_id=example_id,
+            latency_breakdown=args.latency_breakdown,
         )
 
         engines = [
-            ("baseline", b_out, b_tok, b_s, b_err, {}),
-            ("rlm_minimal", m_out, m_tok, m_s, m_err, {"events": m_trace}),
-            ("pyrlm_runtime", p_out, p_tok, p_s, p_err, {"trace_steps": p_steps}),
+            ("baseline", b_out, b_tok, b_s, b_err, b_meta),
+            ("rlm_minimal", m_out, m_tok, m_s, m_err, m_meta),
+            ("pyrlm_runtime", p_out, p_tok, p_s, p_err, p_meta),
         ]
         example_payload = {"id": example_id, "question": question, "results": {}}
 
@@ -884,7 +996,8 @@ def main() -> None:
     config = {
         "dataset": args.dataset,
         "model": args.model,
-        "base_url": args.base_url,
+        "project_id": args.project_id,
+        "location": args.location,
         "max_examples": args.max_examples,
         "sample_strategy": args.sample_strategy,
         "seed": args.seed,
@@ -899,6 +1012,9 @@ def main() -> None:
         "rlm_max_steps": args.rlm_max_steps,
         "rlm_max_subcalls": args.rlm_max_subcalls,
         "minimal_max_iterations": args.minimal_max_iterations,
+        "log_level": args.log_level,
+        "save_prompts": args.save_prompts,
+        "latency_breakdown": args.latency_breakdown,
         "examples_evaluated": len(data),
     }
     validate_result_consistency(rows, per_example, summary, config)

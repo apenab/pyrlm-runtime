@@ -1,0 +1,19 @@
+# Requirements for Vertex AI benchmark
+# Install with: uv pip install -r examples/requirements_vertex.txt
+
+# Core pyrlm-runtime (install from source)
+-e .
+
+# RLM-minimal original implementation
+-e /Users/U01AB0B5/projects/rlm-minimal
+
+# Google Cloud Vertex AI
+google-cloud-aiplatform>=1.60.0
+vertexai>=1.60.0
+
+# Dataset loading
+datasets>=2.14.0
+python-dateutil>=2.8.0
+
+# Optional: Rich console output (for rlm-minimal compatibility)
+rich>=13.0.0
