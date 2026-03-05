@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import collections
 from dataclasses import dataclass
+import datetime
 import io
 import json
 import math
+import pprint
 import re
 import textwrap
+import time
 from contextlib import redirect_stdout
 from typing import Any, Dict, Protocol, runtime_checkable
 
@@ -33,7 +37,7 @@ class PythonREPL:
     def __init__(
         self,
         *,
-        stdout_limit: int = 4000,
+        stdout_limit: int = 16000,
         allowed_modules: Dict[str, Any] | None = None,
         allowed_builtins: Dict[str, Any] | None = None,
     ) -> None:
@@ -45,6 +49,10 @@ class PythonREPL:
             "math": math,
             "json": json,
             "textwrap": textwrap,
+            "collections": collections,
+            "pprint": pprint,
+            "datetime": datetime,
+            "time": time,
         }
         builtins = allowed_builtins or self._default_builtins()
         builtins["__import__"] = self._safe_import(modules)

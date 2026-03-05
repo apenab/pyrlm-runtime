@@ -11,7 +11,7 @@ from .adapters.base import ModelAdapter
 from .cache import CacheRecord, FileCache
 from .context import Context
 from .env import PythonREPL, REPLProtocol
-from .policy import MaxStepsExceeded, Policy, estimate_tokens
+from .policy import MaxStepsExceeded, MaxSubcallsExceeded, MaxTokensExceeded, Policy, estimate_tokens
 from .prompts import (
     BASE_SYSTEM_PROMPT,
     SUBCALL_SYSTEM_PROMPT,
@@ -142,7 +142,14 @@ class RLM:
             if max_tokens is None:
                 max_tokens = self.subcall_max_tokens
             nonlocal subcall_made
-            policy.check_subcall(depth)
+            try:
+                policy.check_subcall(depth)
+            except (MaxSubcallsExceeded, MaxTokensExceeded) as exc:
+                return (
+                    f"[SUBCALL_LIMIT] {exc}. "
+                    "You have used all available sub-LLM calls. "
+                    "Build your final answer now using the information you already have."
+                )
 
             # Include recursive flag in cache key for correct cache separation
             recursive_flag = self.recursive_subcalls and depth < self.max_recursion_depth
@@ -194,7 +201,10 @@ class RLM:
                 aggregated_usage = Usage(
                     prompt_tokens=0, completion_tokens=0, total_tokens=total_tokens
                 )
-                policy.add_subcall_tokens(total_tokens)
+                try:
+                    policy.add_subcall_tokens(total_tokens)
+                except MaxTokensExceeded:
+                    logger.warning("Token budget exceeded after recursive subcall; returning partial result")
                 cache.set(cache_key, CacheRecord(text=result_text, usage=aggregated_usage))
                 trace.add(
                     TraceStep(
@@ -245,7 +255,10 @@ class RLM:
             )
             subcall_made = True
             logger.debug("subcall complete depth=%s tokens=%s", depth, response.usage.total_tokens)
-            policy.add_subcall_tokens(response.usage.total_tokens)
+            try:
+                policy.add_subcall_tokens(response.usage.total_tokens)
+            except MaxTokensExceeded:
+                logger.warning("Token budget exceeded after subcall; returning partial result")
             cache.set(cache_key, CacheRecord(text=response.text, usage=response.usage))
             trace.add(
                 TraceStep(
@@ -752,7 +765,29 @@ class RLM:
 
             logger.debug("root_call step=%s/%s", policy.steps, policy.max_steps)
             response = self.adapter.complete(messages, max_tokens=self.max_tokens, temperature=0.0)
-            policy.add_tokens(response.usage.total_tokens)
+            try:
+                policy.add_tokens(response.usage.total_tokens)
+            except MaxTokensExceeded:
+                logger.warning("Token budget exceeded after root call; triggering graceful finalization")
+                # Still record the response, then finalize with what we have
+                if self.conversation_history:
+                    history.append({"role": "assistant", "content": response.text})
+                # Try auto-finalize first
+                if self.auto_finalize_var:
+                    value = repl.get(self.auto_finalize_var)
+                    if value is not None:
+                        text = str(value).strip()
+                        if text and text.upper() != "NO_ANSWER":
+                            return text, trace
+                # Run fallback code
+                if self.fallback_code:
+                    repl.exec(self.fallback_code)
+                    restore_scaffold()
+                    if self.auto_finalize_var:
+                        value = repl.get(self.auto_finalize_var)
+                        if value is not None:
+                            return str(value).strip(), trace
+                return response.text, trace
 
             # Append assistant response to conversation history
             if self.conversation_history:
