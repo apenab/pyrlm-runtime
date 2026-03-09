@@ -49,7 +49,7 @@ jobs:
         id: bump
         run: |
           uv run cz bump --increment ${{ inputs.bump_type }} --yes
-          echo "version=$(uv run cz version)" >> "$GITHUB_OUTPUT"
+          echo "version=$(uv run cz version -p)" >> "$GITHUB_OUTPUT"
 
       - name: Push changes and tags
         run: git push && git push --tags
@@ -60,7 +60,25 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
 
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        run: |
+          python <<'PY'
+          import pathlib
+          import re
+
+          version = "${{ steps.bump.outputs.version }}"
+          changelog = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          pattern = rf"^## v{re.escape(version)} \([^)]+\)\n(.*?)(?=^## v|\Z)"
+          match = re.search(pattern, changelog, flags=re.MULTILINE | re.DOTALL)
+          if not match:
+              raise SystemExit(f"Could not find CHANGELOG section for v{version}")
+          body = match.group(0).strip()
+          out = pathlib.Path("${{ github.workspace }}") / "release_notes.md"
+          out.write_text(body + "\n", encoding="utf-8")
+          PY
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "v${{ steps.bump.outputs.version }}" --generate-notes
+        run: gh release create "v${{ steps.bump.outputs.version }}" --notes-file release_notes.md
