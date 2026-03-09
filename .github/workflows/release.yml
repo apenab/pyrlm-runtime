@@ -25,6 +25,13 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Validate branch
+        run: |
+          if [ "$(git branch --show-current)" != "main" ]; then
+            echo "Error: Release must be from main branch"
+            exit 1
+          fi
+
       - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
@@ -51,14 +58,8 @@ jobs:
           uv run cz bump --increment ${{ inputs.bump_type }} --yes
           echo "version=$(uv run cz version -p)" >> "$GITHUB_OUTPUT"
 
-      - name: Push changes and tags
-        run: git push && git push --tags
-
       - name: Build
         run: uv build
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
 
       - name: Extract release notes from CHANGELOG
         id: notes
@@ -66,17 +67,37 @@ jobs:
           python <<'PY'
           import pathlib
           import re
+          import sys
 
           version = "${{ steps.bump.outputs.version }}"
-          changelog = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
-          pattern = rf"^## v{re.escape(version)} \([^)]+\)\n(.*?)(?=^## v|\Z)"
+          changelog_path = pathlib.Path("CHANGELOG.md")
+
+          if not changelog_path.exists():
+              print(f"Error: CHANGELOG.md not found", file=sys.stderr)
+              sys.exit(1)
+
+          changelog = changelog_path.read_text(encoding="utf-8")
+          # Match version section more flexibly
+          pattern = rf"^## (?:v)?{re.escape(version)}(?:\s+\([^)]+\))?\s*$(.*?)(?=^## |\Z)"
           match = re.search(pattern, changelog, flags=re.MULTILINE | re.DOTALL)
+
           if not match:
-              raise SystemExit(f"Could not find CHANGELOG section for v{version}")
+              print(f"Error: Could not find CHANGELOG section for version {version}", file=sys.stderr)
+              print(f"Looked for pattern: ## v{version} or ## {version}", file=sys.stderr)
+              sys.exit(1)
+
           body = match.group(0).strip()
           out = pathlib.Path("${{ github.workspace }}") / "release_notes.md"
           out.write_text(body + "\n", encoding="utf-8")
+          print(f"Extracted release notes for v{version}")
           PY
+
+      - name: Push changes and tags
+        run: |
+          git push --follow-tags
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
 
       - name: Create GitHub Release
         env:
