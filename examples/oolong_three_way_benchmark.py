@@ -10,16 +10,16 @@ and mirrors Oolong-style scoring while evaluating three execution strategies:
 
 Usage:
   uv run python examples/oolong_three_way_benchmark.py \
-    --model qwen2.5-coder:14b-instruct \
+    --model qwen/qwen3-14b \
     --dataset synth \
-    --base-url http://127.0.0.1:11434/v1 \
+    --base-url https://openrouter.ai/api/v1 \
     --max-examples 30
 
 Standard reproducible run:
   cd /home/apenab/projects/rlm-runtime && \
-  HF_TOKEN=hf_tu_token \
+  OPENROUTER_API_KEY=sk-or-v1-tu_token \
   uv run python examples/oolong_three_way_benchmark.py \
-    --model qwen2.5-coder:14b-instruct \
+    --model qwen/qwen3-14b \
     --dataset synth \
     --sample-strategy stratified \
     --seed 42 \
@@ -27,14 +27,14 @@ Standard reproducible run:
     --baseline-max-tokens 1024 \
     --agent-max-tokens 2048 \
     --agent-subcall-max-tokens 2048 \
-    --base-url http://127.0.0.1:11434/v1
+    --base-url https://openrouter.ai/api/v1
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
-import io
+import importlib.util
 import json
 import math
 import os
@@ -51,9 +51,63 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Force local project imports (sibling repos under /home/apenab/projects).
+PROJECTS_DIR = Path(__file__).resolve().parents[2]
+LOCAL_PYRLM_SRC = PROJECTS_DIR / "rlm-runtime" / "src"
+LOCAL_RLM_MINIMAL_ROOT = PROJECTS_DIR / "rlm-minimal"
+
+for p in (LOCAL_PYRLM_SRC,):
+    if p.exists():
+        p_str = str(p)
+        if p_str not in sys.path:
+            sys.path.insert(0, p_str)
+
 from pyrlm_runtime import Context, Policy, RLM
 from pyrlm_runtime.adapters import GenericChatAdapter
 from pyrlm_runtime.prompts import BASE_SYSTEM_PROMPT, SUBCALL_SYSTEM_PROMPT
+
+
+def load_local_rlm_minimal_repl_class() -> tuple[type[Any], str]:
+    # Load rlm-minimal as an isolated module to avoid package-name collision on `rlm`.
+    rlm_minimal_root = LOCAL_RLM_MINIMAL_ROOT
+    rlm_pkg_init = rlm_minimal_root / "rlm" / "__init__.py"
+    rlm_repl_path = rlm_minimal_root / "rlm" / "rlm_repl.py"
+    if not rlm_pkg_init.exists() or not rlm_repl_path.exists():
+        raise RuntimeError(
+            f"Local rlm-minimal not found at expected path: {rlm_minimal_root}"
+        )
+
+    base_name = "rlm_minimal_local_pkg"
+    pkg_spec = importlib.util.spec_from_file_location(
+        base_name,
+        rlm_pkg_init,
+        submodule_search_locations=[str(rlm_pkg_init.parent)],
+    )
+    if pkg_spec is None or pkg_spec.loader is None:
+        raise RuntimeError("Failed to build module spec for local rlm-minimal package")
+    pkg_mod = importlib.util.module_from_spec(pkg_spec)
+    sys.modules[base_name] = pkg_mod
+    sys.modules["rlm"] = pkg_mod
+    pkg_spec.loader.exec_module(pkg_mod)
+
+    repl_name = f"{base_name}.rlm_repl"
+    repl_spec = importlib.util.spec_from_file_location(repl_name, rlm_repl_path)
+    if repl_spec is None or repl_spec.loader is None:
+        raise RuntimeError("Failed to build module spec for local rlm-minimal rlm_repl")
+    repl_mod = importlib.util.module_from_spec(repl_spec)
+    repl_mod.__package__ = base_name
+    sys.modules[repl_name] = repl_mod
+    repl_spec.loader.exec_module(repl_mod)
+
+    repl_cls = getattr(repl_mod, "RLM_REPL", None)
+    if repl_cls is None:
+        raise RuntimeError("RLM_REPL class not found in local rlm-minimal module")
+    return repl_cls, str(rlm_repl_path.resolve())
+
+DEFAULT_MODEL = "qwen/qwen3-14b"
+DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+RLM_MINIMAL_REPL_PATH: str | None = None
+RLM_MINIMAL_REPL_CLASS: type[Any] | None = None
 
 
 def usage_total(response: Any) -> int:
@@ -262,199 +316,62 @@ def run_baseline(
 
 
 def run_rlm_minimal(
-    root_adapter: GenericChatAdapter,
-    sub_adapter: GenericChatAdapter,
+    *,
+    model: str,
+    base_url: str,
+    api_key: str,
     context_text: str,
     question: str,
-    *,
     max_tokens: int,
     subcall_tokens: int,
     temperature: float,
     max_iterations: int,
 ) -> tuple[str, int, float, str | None, list[dict[str, Any]]]:
-    safe_builtins = {
-        "print": print,
-        "len": len,
-        "str": str,
-        "int": int,
-        "float": float,
-        "list": list,
-        "dict": dict,
-        "set": set,
-        "tuple": tuple,
-        "bool": bool,
-        "type": type,
-        "isinstance": isinstance,
-        "enumerate": enumerate,
-        "zip": zip,
-        "map": map,
-        "filter": filter,
-        "sorted": sorted,
-        "min": min,
-        "max": max,
-        "sum": sum,
-        "abs": abs,
-        "round": round,
-        "repr": repr,
-        "range": range,
-        "iter": iter,
-        "next": next,
-        "__import__": __import__,
-        "Exception": Exception,
-        "ValueError": ValueError,
-        "TypeError": TypeError,
-        "KeyError": KeyError,
-        "IndexError": IndexError,
-        "AttributeError": AttributeError,
-        "RuntimeError": RuntimeError,
-    }
-    repl_globals: dict[str, Any] = {"__builtins__": safe_builtins}
-    repl_locals: dict[str, Any] = {"context": context_text}
-    total_tokens = 0
-    debug_events: list[dict[str, Any]] = []
-
-    def llm_query(prompt: str) -> str:
-        nonlocal total_tokens
-        msgs = [{"role": "user", "content": prompt}]
-        resp = sub_adapter.complete(msgs, max_tokens=subcall_tokens, temperature=temperature)
-        used = usage_total(resp)
-        total_tokens += used
-        debug_events.append(
-            {
-                "type": "subcall",
-                "prompt_chars": len(prompt),
-                "response_chars": len(resp.text),
-                "tokens": used,
-            }
-        )
-        return resp.text
-
-    repl_globals["llm_query"] = llm_query
-
-    def _exec_code(code: str) -> tuple[str, str | None]:
-        buf = io.StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = buf
-        err: str | None = None
-        try:
-            ns = {**repl_globals, **repl_locals}
-            exec(code, ns, ns)  # noqa: S102
-            for k, v in ns.items():
-                if k not in repl_globals:
-                    repl_locals[k] = v
-        except Exception as exc:
-            err = str(exc)
-        finally:
-            sys.stdout = old_stdout
-        return buf.getvalue(), err
-
-    def _find_code_blocks(text: str) -> list[str]:
-        blocks: list[str] = []
-        blocks.extend(re.findall(r"```repl\s*\n(.*?)\n```", text, re.DOTALL))
-        blocks.extend(re.findall(r"```python\s*\n(.*?)\n```", text, re.DOTALL))
-        return [b for b in blocks if b.strip()]
-
-    def _find_final_answer(text: str) -> tuple[str, str] | None:
-        m = re.search(r"^\s*FINAL_VAR\((.*?)\)", text, re.MULTILINE)
-        if m:
-            return "FINAL_VAR", m.group(1).strip()
-        m = re.search(r"^\s*FINAL\((.*?)\)", text, re.MULTILINE | re.DOTALL)
-        if m:
-            return "FINAL", m.group(1).strip()
-        m = re.search(r"^\s*FINAL\s*:\s*(.+)$", text, re.MULTILINE)
-        if m:
-            return "FINAL", m.group(1).strip()
-        return None
-
-    system_prompt = (
-        "You are in a REPL loop with variable `context` containing the full context and "
-        "`llm_query(prompt)` for subcalls.\n"
-        "Goal: answer the question exactly.\n"
-        "Respond with REPL code blocks and finish with FINAL(...) or FINAL_VAR(...).\n"
-        "Prefer deterministic extraction from `context` when possible."
-    )
-    messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
     start = time.time()
+    # Use local rlm-minimal implementation from /home/apenab/projects/rlm-minimal.
+    # The local client reads OPENAI_API_KEY and supports base URL via OPENAI_BASE_URL.
+    if api_key:
+        os.environ["OPENAI_API_KEY"] = api_key
+    if base_url:
+        os.environ["OPENAI_BASE_URL"] = base_url
+    os.environ["LLM_MODEL"] = model
+
+    global RLM_MINIMAL_REPL_PATH, RLM_MINIMAL_REPL_CLASS
+    try:
+        if RLM_MINIMAL_REPL_CLASS is None:
+            rlm_repl_cls, repl_path = load_local_rlm_minimal_repl_class()
+            RLM_MINIMAL_REPL_CLASS = rlm_repl_cls
+            RLM_MINIMAL_REPL_PATH = repl_path
+        else:
+            rlm_repl_cls = RLM_MINIMAL_REPL_CLASS
+            if RLM_MINIMAL_REPL_PATH is None:
+                RLM_MINIMAL_REPL_PATH = str(LOCAL_RLM_MINIMAL_ROOT / "rlm" / "rlm_repl.py")
+        rlm_minimal = rlm_repl_cls(
+            api_key=api_key or None,
+            model=model,
+            recursive_model=model,
+            max_iterations=max_iterations,
+            enable_logging=False,
+        )
+    except Exception as exc:
+        return (
+            "",
+            0,
+            time.time() - start,
+            f"rlm-minimal init error: {exc}",
+            [],
+        )
+
+    prompt = (
+        f"Context:\n{context_text}\n\nQuestion:\n{question}\n\n"
+        "Return only the final answer token/string."
+    )
 
     try:
-        for i in range(max_iterations):
-            user_msg = (
-                f"Question: {question}\n"
-                "If not done, write code in ```python``` or ```repl```.\n"
-                "If done, output FINAL(...) or FINAL_VAR(...)."
-            )
-            call_messages = messages + [{"role": "user", "content": user_msg}]
-            resp = root_adapter.complete(call_messages, max_tokens=max_tokens, temperature=temperature)
-            root_tokens = usage_total(resp)
-            total_tokens += root_tokens
-            text = resp.text or ""
-            debug_events.append(
-                {
-                    "type": "root_call",
-                    "iteration": i + 1,
-                    "response_chars": len(text),
-                    "tokens": root_tokens,
-                }
-            )
-            messages.append({"role": "assistant", "content": text})
-
-            final = _find_final_answer(text)
-            if final:
-                kind, content = final
-                if kind == "FINAL":
-                    return content.strip(), total_tokens, time.time() - start, None, debug_events
-                var_name = content.strip().strip("\"").strip("'")
-                return (
-                    str(repl_locals.get(var_name, f"(variable '{var_name}' not found)")),
-                    total_tokens,
-                    time.time() - start,
-                    None,
-                    debug_events,
-                )
-
-            code_blocks = _find_code_blocks(text)
-            if not code_blocks:
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": "No executable code found. Provide code or FINAL(...).",
-                    }
-                )
-                continue
-
-            for idx, code in enumerate(code_blocks, start=1):
-                stdout, stderr = _exec_code(code)
-                debug_events.append(
-                    {
-                        "type": "repl_exec",
-                        "iteration": i + 1,
-                        "block_index": idx,
-                        "code": code,
-                        "stdout": stdout,
-                        "stderr": stderr,
-                    }
-                )
-                output = stdout or "(no output)"
-                if stderr:
-                    output += f"\nError: {stderr}"
-                if len(output) > 120000:
-                    output = output[:120000] + "..."
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": f"Code output:\n{output}",
-                    }
-                )
-
-        resp = root_adapter.complete(
-            messages + [{"role": "user", "content": "Return final answer now using FINAL(...)"}],
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
-        total_tokens += usage_total(resp)
-        return resp.text or "", total_tokens, time.time() - start, None, debug_events
+        result = rlm_minimal.completion(prompt)
+        return result or "", 0, time.time() - start, None, []
     except Exception as exc:
-        return "", total_tokens, time.time() - start, str(exc), debug_events
+        return "", 0, time.time() - start, str(exc), []
 
 
 def summarize_trace_steps(trace: Any) -> dict[str, int]:
@@ -705,11 +622,16 @@ def write_markdown_summary(path: Path, summary: dict[str, Any], by_bucket: dict[
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", choices=["synth", "real"], default="synth")
-    parser.add_argument("--model", required=True)
-    parser.add_argument("--base-url", default=os.getenv("LLM_BASE_URL", "http://127.0.0.1:11434/v1"))
+    parser.add_argument("--model", default=os.getenv("LLM_MODEL", DEFAULT_MODEL))
+    parser.add_argument("--base-url", default=os.getenv("LLM_BASE_URL", DEFAULT_BASE_URL))
     parser.add_argument(
         "--api-key",
-        default=os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY") or "",
+        default=(
+            os.getenv("OPENROUTER_API_KEY")
+            or os.getenv("LLM_API_KEY")
+            or os.getenv("OPENAI_API_KEY")
+            or ""
+        ),
     )
     parser.add_argument("--max-examples", type=int, default=100)
     parser.add_argument(
@@ -774,20 +696,6 @@ def main() -> None:
         timeout=900,
         payload_builder=openrouter_payload_builder,
     )
-    min_root = GenericChatAdapter(
-        base_url=args.base_url,
-        model=args.model,
-        api_key=args.api_key,
-        timeout=900,
-        payload_builder=openrouter_payload_builder,
-    )
-    min_sub = GenericChatAdapter(
-        base_url=args.base_url,
-        model=args.model,
-        api_key=args.api_key,
-        timeout=900,
-        payload_builder=openrouter_payload_builder,
-    )
     py_root = GenericChatAdapter(
         base_url=args.base_url,
         model=args.model,
@@ -823,10 +731,11 @@ def main() -> None:
             temperature=args.temperature,
         )
         m_out, m_tok, m_s, m_err, m_trace = run_rlm_minimal(
-            min_root,
-            min_sub,
-            context_text,
-            question,
+            model=args.model,
+            base_url=args.base_url,
+            api_key=args.api_key,
+            context_text=context_text,
+            question=question,
             max_tokens=agent_max_tokens,
             subcall_tokens=agent_subcall_max_tokens,
             temperature=args.temperature,
@@ -885,6 +794,10 @@ def main() -> None:
         "dataset": args.dataset,
         "model": args.model,
         "base_url": args.base_url,
+        "module_paths": {
+            "pyrlm_runtime": str(Path(sys.modules["pyrlm_runtime"].__file__).resolve()),
+            "rlm_minimal_repl": RLM_MINIMAL_REPL_PATH,
+        },
         "max_examples": args.max_examples,
         "sample_strategy": args.sample_strategy,
         "seed": args.seed,
