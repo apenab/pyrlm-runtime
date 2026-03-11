@@ -134,6 +134,37 @@ class Context:
             start = end
         return chunks
 
+    def page(
+        self,
+        page_number: int,
+        *,
+        marker_pattern: str = r"<!-- Page (\d+) -->",
+    ) -> str | None:
+        """Extract the full text of a page by its marker number.
+
+        Searches for markers matching *marker_pattern* (must contain one capture
+        group with the page number) and returns all text between the matched
+        marker and the next marker (or end of text for the last page).
+
+        Returns ``None`` if no marker with *page_number* is found or if the
+        text contains no markers at all.
+        """
+        target = None
+        next_start = None
+        for m in re.finditer(marker_pattern, self.text):
+            num = int(m.group(1))
+            if target is not None and next_start is None:
+                # First marker after the one we matched — marks the boundary.
+                next_start = m.start()
+                break
+            if num == page_number:
+                target = m
+        if target is None:
+            return None
+        start = target.end()
+        end = next_start if next_start is not None else len(self.text)
+        return self.text[start:end]
+
     def metadata(self) -> dict:
         """Return metadata about the context for the system prompt."""
         meta: dict = {
