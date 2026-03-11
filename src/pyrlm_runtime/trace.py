@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+import threading
+from dataclasses import dataclass, asdict, field
 import json
 from typing import Literal
 
@@ -33,14 +34,19 @@ class TraceStep:
     input_hash: str | None = None
     output_hash: str | None = None
     cache_key: str | None = None
+    parallel_group_id: str | None = None
+    parallel_index: int | None = None
+    parallel_total: int | None = None
 
 
 @dataclass
 class Trace:
     steps: list[TraceStep]
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def add(self, step: TraceStep) -> None:
-        self.steps.append(step)
+        with self._lock:
+            self.steps.append(step)
 
     def to_json(self) -> str:
         def serialize(step: TraceStep) -> dict:
@@ -75,6 +81,9 @@ class Trace:
                     input_hash=item.get("input_hash"),
                     output_hash=item.get("output_hash"),
                     cache_key=item.get("cache_key"),
+                    parallel_group_id=item.get("parallel_group_id"),
+                    parallel_index=item.get("parallel_index"),
+                    parallel_total=item.get("parallel_total"),
                 )
             )
         return cls(steps=steps)

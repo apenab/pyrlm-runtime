@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import logging
 from pathlib import Path
+import threading
 import time
 from typing import Any
 from .adapters.base import ModelAdapter
@@ -164,11 +165,20 @@ class RLM:
         repl.set("lenP", lenp)
 
         step_id = 0
+        _step_lock = threading.Lock()
+        parallel_group_id = 0
 
         def next_step_id() -> int:
             nonlocal step_id
-            step_id += 1
-            return step_id
+            with _step_lock:
+                step_id += 1
+                return step_id
+
+        def next_parallel_group_id() -> str:
+            nonlocal parallel_group_id
+            with _step_lock:
+                parallel_group_id += 1
+                return f"parallel-{parallel_group_id}"
 
         # Select adapter for subcalls (paper-aligned: can use different/cheaper model)
         effective_subcall_adapter = self.subcall_adapter or self.adapter
@@ -179,6 +189,9 @@ class RLM:
             model: str | None = None,
             max_tokens: int | None = None,
             depth: int = 1,
+            parallel_group: str | None = None,
+            parallel_index: int | None = None,
+            parallel_total: int | None = None,
         ) -> str:
             if max_tokens is None:
                 max_tokens = self.subcall_max_tokens
@@ -219,6 +232,9 @@ class RLM:
                         input_hash=input_hash,
                         output_hash=_hash_text(cached.text),
                         cache_key=cache_key,
+                        parallel_group_id=parallel_group,
+                        parallel_index=parallel_index,
+                        parallel_total=parallel_total,
                     )
                 )
                 return cached.text
@@ -265,6 +281,9 @@ class RLM:
                         input_hash=input_hash,
                         output_hash=_hash_text(result_text),
                         cache_key=cache_key,
+                        parallel_group_id=parallel_group,
+                        parallel_index=parallel_index,
+                        parallel_total=parallel_total,
                     )
                 )
                 # Merge sub-trace steps into main trace for visibility
@@ -323,6 +342,9 @@ class RLM:
                     input_hash=input_hash,
                     output_hash=_hash_text(response.text),
                     cache_key=cache_key,
+                    parallel_group_id=parallel_group,
+                    parallel_index=parallel_index,
+                    parallel_total=parallel_total,
                 )
             )
             return response.text
@@ -400,24 +422,10 @@ class RLM:
             use_parallel = parallel if parallel is not None else self.parallel_subcalls
 
             if use_parallel and len(unique_chunks) > 1:
-                # Paper-aligned: parallel subcalls for efficiency
-                unique_results: list[str | None] = [None] * len(unique_chunks)
-
-                def process_chunk(idx: int, chunk: str) -> tuple[int, str]:
-                    return idx, subcall(chunk, model=model, max_tokens=max_tokens)
-
-                max_workers = min(self.max_concurrent_subcalls, len(unique_chunks))
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = {
-                        executor.submit(process_chunk, i, c): i for i, c in enumerate(unique_chunks)
-                    }
-                    for future in as_completed(futures):
-                        idx, result = future.result()
-                        unique_results[idx] = result
-
-                # Map results back to original order
-                chunk_to_result = {c: unique_results[i] for i, c in enumerate(unique_chunks)}
-                return [chunk_to_result[c] or "" for c in prepared]
+                # Delegate to llm_batch for parallel execution
+                unique_results_list = llm_batch(unique_chunks, model=model, max_tokens=max_tokens)
+                chunk_to_result = {c: unique_results_list[i] for i, c in enumerate(unique_chunks)}
+                return [chunk_to_result[c] for c in prepared]
             else:
                 # Sequential processing (original behavior)
                 results: list[str] = []
@@ -430,6 +438,73 @@ class RLM:
                     seen[chunk] = result
                     results.append(result)
                 return results
+
+        def llm_batch(
+            prompts: list[str],
+            *,
+            model: str | None = None,
+            max_tokens: int | None = None,
+        ) -> list[str]:
+            """Process a batch of prompts in parallel using sub-LLM calls.
+
+            Args:
+                prompts: List of prompt strings to process.
+                model: Optional model override for subcalls.
+                max_tokens: Optional max tokens per response.
+
+            Returns:
+                List of response strings in the same order as input prompts.
+            """
+            if max_tokens is None:
+                max_tokens = self.subcall_max_tokens
+            if not prompts:
+                return []
+            if not isinstance(prompts, list):
+                raise ValueError("llm_batch expects a list of prompt strings.")
+
+            # Single prompt: call subcall directly (no thread overhead)
+            if len(prompts) == 1:
+                return [subcall(prompts[0], model=model, max_tokens=max_tokens)]
+
+            # Deduplicate prompts while preserving order
+            unique_prompts: list[str] = []
+            seen_set: set[str] = set()
+            for p in prompts:
+                if p not in seen_set:
+                    seen_set.add(p)
+                    unique_prompts.append(p)
+
+            unique_results: list[str | None] = [None] * len(unique_prompts)
+            group_id = next_parallel_group_id()
+
+            def _process_one(idx: int, prompt: str) -> tuple[int, str]:
+                try:
+                    return (
+                        idx,
+                        subcall(
+                            prompt,
+                            model=model,
+                            max_tokens=max_tokens,
+                            parallel_group=group_id,
+                            parallel_index=idx,
+                            parallel_total=len(unique_prompts),
+                        ),
+                    )
+                except Exception as exc:
+                    return idx, f"[ERROR] {exc}"
+
+            max_workers = min(self.max_concurrent_subcalls, len(unique_prompts))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(_process_one, i, p): i for i, p in enumerate(unique_prompts)
+                }
+                for future in as_completed(futures):
+                    idx, result = future.result()
+                    unique_results[idx] = result
+
+            # Map back to original order (handles duplicates)
+            prompt_to_result = {p: unique_results[i] for i, p in enumerate(unique_prompts)}
+            return [prompt_to_result[p] or "" for p in prompts]
 
         def ask(question: str, text: str, *, max_tokens: int | None = None) -> str:
             return subcall(f"Question: {question}\nSnippet:\n{text}", max_tokens=max_tokens)
@@ -547,6 +622,7 @@ class RLM:
 
         repl.set("llm_query", subcall)
         repl.set("llm_query_batch", subcall_batch)
+        repl.set("llm_batch", llm_batch)
         repl.set("ask", ask)
         repl.set("ask_chunk", ask_chunk)
         repl.set("ask_chunked", ask_chunked)
@@ -575,6 +651,7 @@ class RLM:
             "lenP": lenp,
             "llm_query": subcall,
             "llm_query_batch": subcall_batch,
+            "llm_batch": llm_batch,
             "ask": ask,
             "ask_chunk": ask_chunk,
             "ask_chunked": ask_chunked,

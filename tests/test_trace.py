@@ -26,6 +26,9 @@ def test_trace_roundtrip() -> None:
             input_hash="in",
             output_hash="out",
             cache_key="key",
+            parallel_group_id="parallel-1",
+            parallel_index=0,
+            parallel_total=2,
         )
     )
 
@@ -36,6 +39,9 @@ def test_trace_roundtrip() -> None:
     assert restored.steps[0].output == "print('hi')"
     assert restored.steps[0].elapsed == 0.123
     assert restored.steps[1].cache_hit is True
+    assert restored.steps[1].parallel_group_id == "parallel-1"
+    assert restored.steps[1].parallel_index == 0
+    assert restored.steps[1].parallel_total == 2
 
 
 def test_trace_from_json_backward_compatible_without_new_fields() -> None:
@@ -57,3 +63,4 @@ def test_trace_from_json_backward_compatible_without_new_fields() -> None:
     assert len(restored.steps) == 1
     assert restored.steps[0].output is None
     assert restored.steps[0].elapsed is None
+    assert restored.steps[0].parallel_group_id is None

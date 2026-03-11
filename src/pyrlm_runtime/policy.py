@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 
 
 class PolicyError(RuntimeError):
@@ -34,34 +35,42 @@ class Policy:
     subcalls: int = 0
     total_tokens: int = 0
     subcall_tokens: int = 0
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def check_step(self) -> None:
-        if self.steps >= self.max_steps:
-            raise MaxStepsExceeded("max_steps exceeded")
-        self.steps += 1
+        with self._lock:
+            if self.steps >= self.max_steps:
+                raise MaxStepsExceeded("max_steps exceeded")
+            self.steps += 1
 
     def check_subcall(self, depth: int) -> None:
-        if depth > self.max_recursion_depth:
-            raise MaxRecursionExceeded("max_recursion_depth exceeded")
-        if self.subcalls >= self.max_subcalls:
-            raise MaxSubcallsExceeded("max_subcalls exceeded")
-        self.subcalls += 1
+        with self._lock:
+            if depth > self.max_recursion_depth:
+                raise MaxRecursionExceeded("max_recursion_depth exceeded")
+            if self.subcalls >= self.max_subcalls:
+                raise MaxSubcallsExceeded("max_subcalls exceeded")
+            self.subcalls += 1
 
     def add_tokens(self, tokens: int) -> None:
-        if tokens <= 0:
-            return
-        if self.total_tokens + tokens > self.max_total_tokens:
-            raise MaxTokensExceeded("max_total_tokens exceeded")
-        self.total_tokens += tokens
+        with self._lock:
+            if tokens <= 0:
+                return
+            if self.total_tokens + tokens > self.max_total_tokens:
+                raise MaxTokensExceeded("max_total_tokens exceeded")
+            self.total_tokens += tokens
 
     def add_subcall_tokens(self, tokens: int) -> None:
-        if tokens <= 0:
-            return
-        if self.max_subcall_tokens is not None:
-            if self.subcall_tokens + tokens > self.max_subcall_tokens:
-                raise MaxTokensExceeded("max_subcall_tokens exceeded")
-        self.subcall_tokens += tokens
-        self.add_tokens(tokens)
+        with self._lock:
+            if tokens <= 0:
+                return
+            if self.max_subcall_tokens is not None:
+                if self.subcall_tokens + tokens > self.max_subcall_tokens:
+                    raise MaxTokensExceeded("max_subcall_tokens exceeded")
+            self.subcall_tokens += tokens
+            # Inline add_tokens logic to avoid nested lock acquisition.
+            if self.total_tokens + tokens > self.max_total_tokens:
+                raise MaxTokensExceeded("max_total_tokens exceeded")
+            self.total_tokens += tokens
 
 
 def estimate_tokens(text: str) -> int:

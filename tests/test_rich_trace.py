@@ -117,6 +117,40 @@ def test_rich_trace_listener_renders_errors_truncation_and_cache_hits() -> None:
     assert "ZeroDivisionError" in rendered
 
 
+def test_rich_trace_listener_renders_parallel_subcalls() -> None:
+    console = Console(record=True, width=120)
+    listener = RichTraceListener(console=console, max_output_length=5000)
+    adapter = FakeAdapter(
+        script=[
+            "\n".join(
+                [
+                    "chunks = ctx.chunk(5)",
+                    "answers = ask_chunks('Summarize.', chunks, parallel=True)",
+                    "answer = ','.join(answers)",
+                ]
+            ),
+            "FINAL_VAR: answer",
+        ]
+    )
+    adapter.add_rule("You are a sub-LLM", "subcall-answer")
+
+    runtime = RLM(adapter=adapter, event_listener=listener, parallel_subcalls=True)
+    output, trace = runtime.run("Summarize.", Context.from_text("abcdefghij"))
+
+    rendered = console.export_text()
+    subcall_steps = [step for step in trace.steps if step.kind == "subcall"]
+
+    assert output == "subcall-answer,subcall-answer"
+    assert len(subcall_steps) == 2
+    assert "Parallel Subcalls" in rendered
+    assert "Parallel Batch Progress" in rendered
+    assert "2/2 done" in rendered
+    assert "cached" in rendered
+    assert "errors 0" in rendered
+    assert "Parallel Subcall [1/2]" in rendered or "Parallel Subcall [2/2]" in rendered
+    assert "Parallel Batch Finished" in rendered
+
+
 def test_rich_trace_import_error_message_is_actionable(monkeypatch: pytest.MonkeyPatch) -> None:
     module_name = "pyrlm_runtime._rich_trace_import_error_test"
     path = Path(pyrlm_runtime.__file__).resolve().parent / "rich_trace.py"

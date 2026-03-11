@@ -17,6 +17,7 @@ The REPL environment is initialized with these variables and functions:
    - ctx.slice(start, end) returns str
    - ctx.find(pattern, regex=False, max_matches=20, case_sensitive=True) returns list of tuples
    - ctx.chunk(size, overlap=0) returns list of tuples
+   - ctx.page(n, marker_pattern=r"<!-- Page (\\d+) -->") returns str or None (full text of page n)
    - ctx.chunk_documents(docs_per_chunk=10) returns list of tuples
    - ctx.get_document(i) returns str
    - ctx.num_documents() returns int
@@ -31,6 +32,9 @@ The REPL environment is initialized with these variables and functions:
 4. Sub-LLM query functions (use these to analyze text):
    - llm_query(text): query one chunk
    - llm_query_batch(chunks): query multiple chunks
+   - llm_batch(prompts): process a list of prompts in parallel.
+     Takes a list of strings, returns a list of responses (same order).
+     Prefer this over sequential llm_query loops for multiple independent sub-tasks.
    - ask(question, text): ask specific question about text
    - ask_chunks(question, chunks): ask question across chunks
    - ask_chunks_first(question, chunks): ask until first answer
