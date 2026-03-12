@@ -50,6 +50,8 @@ class RichTraceListener(RLMEventListener):
                 self._render_run_finished(event)
 
     def _render_run_started(self, event: RLMEvent) -> None:
+        self._repl_count = 0
+        self._parallel_batches.clear()
         query = event.query or "(no query)"
         meta = event.context_metadata or {}
         summary = [
@@ -169,6 +171,7 @@ class RichTraceListener(RLMEventListener):
                     f" | cached {batch.cached}"
                     f" | errors {batch.errors}"
                 )
+                self._parallel_batches.pop(step.parallel_group_id, None)
         body = []
         if step.prompt_summary:
             body.append(f"Prompt: {self._truncate(step.prompt_summary)}")

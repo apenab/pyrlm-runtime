@@ -77,3 +77,70 @@ def test_metadata() -> None:
     assert meta_docs["context_type"] == "document_list"
     assert meta_docs["num_documents"] == 2
     assert meta_docs["document_lengths"] == [5, 21]
+
+
+# ── ctx.page() tests ────────────────────────────────────────────────
+
+
+_SAMPLE_DOC = (
+    "Header text\n"
+    "<!-- Page 1 -->\nPage one content here.\n"
+    "<!-- Page 2 -->\nPage two content here.\n"
+    "<!-- Page 3 -->\nPage three — the last page.\n"
+)
+
+
+def test_page_basic_extraction() -> None:
+    ctx = Context.from_text(_SAMPLE_DOC)
+    assert ctx.page(1) == "\nPage one content here.\n"
+    assert ctx.page(2) == "\nPage two content here.\n"
+
+
+def test_page_last_page_extends_to_end() -> None:
+    ctx = Context.from_text(_SAMPLE_DOC)
+    result = ctx.page(3)
+    assert result is not None
+    assert "Page three" in result
+    # Last page should extend to end of text, not stop at a marker.
+    assert result == "\nPage three — the last page.\n"
+
+
+def test_page_not_found_returns_none() -> None:
+    ctx = Context.from_text(_SAMPLE_DOC)
+    assert ctx.page(99) is None
+    assert ctx.page(0) is None
+
+
+def test_page_no_markers_returns_none() -> None:
+    ctx = Context.from_text("Plain text with no page markers at all.")
+    assert ctx.page(1) is None
+
+
+def test_page_custom_marker_pattern() -> None:
+    text = "[P1]First\n[P2]Second\n[P3]Third"
+    ctx = Context.from_text(text)
+    result = ctx.page(2, marker_pattern=r"\[P(\d+)\]")
+    assert result == "Second\n"
+
+
+def test_page_regression_doc1_p49_q11() -> None:
+    """Regression: the broad ask() found the answer on Page 48.
+
+    Previously ctx.find() for the distinctive phrase returned [] due to
+    OCR issues, causing a keyword fallback to the wrong page.  ctx.page(48)
+    should return the correct content directly.
+    """
+    # Build a document that mimics the real structure
+    pages = []
+    for i in range(1, 51):
+        pages.append(f"<!-- Page {i} -->\nContent of page {i}.")
+        if i == 48:
+            pages[-1] += "\nInversiones inmobiliarias — Nota 8 detail here."
+    doc = "\n".join(pages)
+    ctx = Context.from_text(doc)
+
+    result = ctx.page(48)
+    assert result is not None
+    assert "Inversiones inmobiliarias" in result
+    # Must NOT contain content from page 49
+    assert "Content of page 49" not in result

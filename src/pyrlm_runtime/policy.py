@@ -35,6 +35,8 @@ class Policy:
     subcalls: int = 0
     total_tokens: int = 0
     subcall_tokens: int = 0
+    _reserved_total_tokens: int = field(default=0, repr=False, compare=False)
+    _reserved_subcall_tokens: int = field(default=0, repr=False, compare=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def check_step(self) -> None:
@@ -63,14 +65,67 @@ class Policy:
         with self._lock:
             if tokens <= 0:
                 return
+            new_subcall_tokens = self.subcall_tokens + tokens
+            new_total_tokens = self.total_tokens + tokens
             if self.max_subcall_tokens is not None:
-                if self.subcall_tokens + tokens > self.max_subcall_tokens:
+                if new_subcall_tokens > self.max_subcall_tokens:
                     raise MaxTokensExceeded("max_subcall_tokens exceeded")
-            self.subcall_tokens += tokens
-            # Inline add_tokens logic to avoid nested lock acquisition.
-            if self.total_tokens + tokens > self.max_total_tokens:
+            if new_total_tokens > self.max_total_tokens:
                 raise MaxTokensExceeded("max_total_tokens exceeded")
-            self.total_tokens += tokens
+            self.subcall_tokens = new_subcall_tokens
+            self.total_tokens = new_total_tokens
+
+    def reserve_subcall_tokens(self, tokens: int) -> None:
+        with self._lock:
+            if tokens <= 0:
+                return
+            new_reserved_subcall_tokens = self._reserved_subcall_tokens + tokens
+            new_reserved_total_tokens = self._reserved_total_tokens + tokens
+            if self.max_subcall_tokens is not None:
+                if self.subcall_tokens + new_reserved_subcall_tokens > self.max_subcall_tokens:
+                    raise MaxTokensExceeded("max_subcall_tokens exceeded")
+            if self.total_tokens + new_reserved_total_tokens > self.max_total_tokens:
+                raise MaxTokensExceeded("max_total_tokens exceeded")
+            self._reserved_subcall_tokens = new_reserved_subcall_tokens
+            self._reserved_total_tokens = new_reserved_total_tokens
+
+    def release_subcall_tokens(self, tokens: int) -> None:
+        with self._lock:
+            if tokens <= 0:
+                return
+            if tokens > self._reserved_subcall_tokens or tokens > self._reserved_total_tokens:
+                raise ValueError("cannot release more reserved subcall tokens than reserved")
+            self._reserved_subcall_tokens -= tokens
+            self._reserved_total_tokens -= tokens
+
+    def finalize_subcall_tokens(self, reserved_tokens: int, actual_tokens: int) -> None:
+        with self._lock:
+            if reserved_tokens < 0 or actual_tokens < 0:
+                raise ValueError("token counts must be non-negative")
+            if reserved_tokens > self._reserved_subcall_tokens:
+                raise ValueError("reserved subcall token budget underflow")
+            if reserved_tokens > self._reserved_total_tokens:
+                raise ValueError("reserved total token budget underflow")
+
+            remaining_reserved_subcall_tokens = self._reserved_subcall_tokens - reserved_tokens
+            remaining_reserved_total_tokens = self._reserved_total_tokens - reserved_tokens
+            new_subcall_tokens = self.subcall_tokens + actual_tokens
+            new_total_tokens = self.total_tokens + actual_tokens
+
+            if self.max_subcall_tokens is not None:
+                if new_subcall_tokens + remaining_reserved_subcall_tokens > self.max_subcall_tokens:
+                    self._reserved_subcall_tokens = remaining_reserved_subcall_tokens
+                    self._reserved_total_tokens = remaining_reserved_total_tokens
+                    raise MaxTokensExceeded("max_subcall_tokens exceeded")
+            if new_total_tokens + remaining_reserved_total_tokens > self.max_total_tokens:
+                self._reserved_subcall_tokens = remaining_reserved_subcall_tokens
+                self._reserved_total_tokens = remaining_reserved_total_tokens
+                raise MaxTokensExceeded("max_total_tokens exceeded")
+
+            self._reserved_subcall_tokens = remaining_reserved_subcall_tokens
+            self._reserved_total_tokens = remaining_reserved_total_tokens
+            self.subcall_tokens = new_subcall_tokens
+            self.total_tokens = new_total_tokens
 
 
 def estimate_tokens(text: str) -> int:
