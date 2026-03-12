@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 import httpx
 import pytest
 
 from pyrlm_runtime.adapters import (
+    AzureOpenAIAdapter,
     FakeAdapter,
     FakeRule,
     GenericChatAdapter,
@@ -364,6 +366,94 @@ class TestOpenAICompatAdapter:
             adapter = OpenAICompatAdapter(model="m", base_url="http://explicit/v1")
             assert "explicit" in adapter._adapter.endpoint
             adapter._adapter.close()
+
+
+# ---------------------------------------------------------------------------
+# AzureOpenAIAdapter
+# ---------------------------------------------------------------------------
+
+
+class TestAzureOpenAIAdapter:
+    def test_uses_openai_endpoint_when_present(self) -> None:
+        env = {
+            "AZURE_OPENAI_API_KEY": " azure-key ",
+            "OPENAI_ENDPOINT": " https://demo.openai.azure.com/openai/v1 ",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            adapter = AzureOpenAIAdapter(model=" gpt-5.1 ")
+            assert (
+                adapter.endpoint
+                == "https://demo.openai.azure.com/openai/deployments/gpt-5.1/chat/completions"
+                "?api-version=2024-10-21"
+            )
+            assert adapter._adapter.headers["api-key"] == "azure-key"
+            assert "Authorization" not in adapter._adapter.headers
+            adapter.close()
+
+    def test_builds_endpoint_from_account_name(self) -> None:
+        env = {
+            "AZURE_OPENAI_API_KEY": "azure-key",
+            "AZURE_ACCOUNT_NAME": "my-account",
+            "AZURE_OPENAI_API_VERSION": "2025-01-01-preview",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            adapter = AzureOpenAIAdapter(model="gpt-5.1")
+            assert (
+                adapter.endpoint
+                == "https://my-account.openai.azure.com/openai/deployments/gpt-5.1/chat/completions"
+                "?api-version=2025-01-01-preview"
+            )
+            adapter.close()
+
+    def test_explicit_api_version_overrides_env(self) -> None:
+        env = {
+            "AZURE_OPENAI_API_KEY": "azure-key",
+            "AZURE_ACCOUNT_NAME": "my-account",
+            "AZURE_OPENAI_API_VERSION": "2025-01-01-preview",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            adapter = AzureOpenAIAdapter(model="gpt-5.1", api_version="2024-10-21")
+            assert adapter.api_version == "2024-10-21"
+            adapter.close()
+
+    def test_requires_api_key(self) -> None:
+        with patch.dict("os.environ", {"AZURE_ACCOUNT_NAME": "my-account"}, clear=True):
+            with pytest.raises(EnvironmentError, match="Missing AZURE_OPENAI_API_KEY"):
+                AzureOpenAIAdapter(model="gpt-5.1")
+
+    def test_requires_endpoint_or_account_name(self) -> None:
+        with patch.dict("os.environ", {"AZURE_OPENAI_API_KEY": "azure-key"}, clear=True):
+            with pytest.raises(EnvironmentError, match="Set OPENAI_ENDPOINT or AZURE_ACCOUNT_NAME"):
+                AzureOpenAIAdapter(model="gpt-5.1")
+
+    def test_sends_azure_payload_and_parses_usage(self) -> None:
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            captured["headers"] = dict(request.headers)
+            captured["body"] = request.content.decode("utf-8")
+            return _ok_response("azure hello")
+
+        env = {
+            "AZURE_OPENAI_API_KEY": "azure-key",
+            "OPENAI_ENDPOINT": "https://demo.openai.azure.com",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            adapter = AzureOpenAIAdapter(model="gpt-5.1")
+            adapter._adapter._client = httpx.Client(transport=httpx.MockTransport(handler))
+            result = adapter.complete(MESSAGES, max_tokens=321, temperature=0.2)
+
+            assert result.text == "azure hello"
+            assert result.usage.total_tokens == 7
+            assert result.model_id == "gpt-5.1"
+            assert "api-key" in captured["headers"]
+            assert "authorization" not in captured["headers"]
+            payload = json.loads(str(captured["body"]))
+            assert payload["max_completion_tokens"] == 321
+            assert payload["temperature"] == 0.2
+            assert "model" not in payload
+            adapter.close()
 
 
 # ---------------------------------------------------------------------------
