@@ -53,6 +53,7 @@ When fixing a bug or correcting a behavior, always add a regression test that wo
 ## REPL backends
 
 Two interchangeable backends via `REPLProtocol`:
+
 - `"python"` (default): PythonREPL using `exec()` with whitelist sandbox
 - `"monty"`: MontyREPL using pydantic-monty (Rust interpreter, secure)
 
@@ -62,3 +63,4 @@ Both expose: `exec(code) -> ExecResult`, `get(name)`, `set(name, value)`
 
 - **Variable capture in MontyREPL**: AST-based detection of assignments, append capture dict, extract from result
 - **Object proxy for MontyREPL**: complex objects (e.g. Context) registered via `_register_object` -- methods become external functions with `{name}__{method}` naming, AST rewrites `ctx.method()` -> `ctx__method()`
+- Every change in the Architecture or core logic must be accompanied by updates to the documentation inside the /docs directory.

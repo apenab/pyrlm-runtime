@@ -151,6 +151,73 @@ def test_rich_trace_listener_renders_parallel_subcalls() -> None:
     assert "Parallel Batch Finished" in rendered
 
 
+def test_rich_trace_listener_clears_parallel_batch_on_completion() -> None:
+    console = Console(record=True, width=120)
+    listener = RichTraceListener(console=console, max_output_length=5000)
+
+    listener.handle(
+        RLMEvent(
+            kind="run_started",
+            query="Q?",
+            context_metadata={"total_length": 10, "context_type": "text", "num_documents": 1},
+            repl_backend="python",
+        )
+    )
+    listener.handle(
+        RLMEvent(
+            kind="step_completed",
+            step=TraceStep(
+                step_id=1,
+                kind="subcall",
+                depth=1,
+                prompt_summary="a",
+                output="A",
+                parallel_group_id="parallel-1",
+                parallel_index=0,
+                parallel_total=2,
+            ),
+        )
+    )
+    assert "parallel-1" in listener._parallel_batches
+
+    listener.handle(
+        RLMEvent(
+            kind="step_completed",
+            step=TraceStep(
+                step_id=2,
+                kind="subcall",
+                depth=1,
+                prompt_summary="b",
+                output="B",
+                parallel_group_id="parallel-1",
+                parallel_index=1,
+                parallel_total=2,
+            ),
+        )
+    )
+
+    assert "parallel-1" not in listener._parallel_batches
+
+
+def test_rich_trace_listener_resets_stale_parallel_state_on_run_start() -> None:
+    console = Console(record=True, width=120)
+    listener = RichTraceListener(console=console, max_output_length=5000)
+    listener._repl_count = 7
+    listener._parallel_batches["stale"] = object()  # type: ignore[assignment]
+
+    listener.handle(
+        RLMEvent(
+            kind="run_started",
+            query="Fresh run",
+            context_metadata={"total_length": 10, "context_type": "text", "num_documents": 1},
+            repl_backend="python",
+        )
+    )
+
+    assert listener._repl_count == 0
+    assert listener._parallel_batches == {}
+
+
 def test_rich_trace_import_error_message_is_actionable(monkeypatch: pytest.MonkeyPatch) -> None:
     module_name = "pyrlm_runtime._rich_trace_import_error_test"
     path = Path(pyrlm_runtime.__file__).resolve().parent / "rich_trace.py"

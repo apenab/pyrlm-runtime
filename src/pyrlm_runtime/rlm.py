@@ -192,6 +192,7 @@ class RLM:
             parallel_group: str | None = None,
             parallel_index: int | None = None,
             parallel_total: int | None = None,
+            reserved_tokens: int = 0,
         ) -> str:
             if max_tokens is None:
                 max_tokens = self.subcall_max_tokens
@@ -200,6 +201,8 @@ class RLM:
             try:
                 policy.check_subcall(depth)
             except (MaxSubcallsExceeded, MaxTokensExceeded) as exc:
+                if reserved_tokens > 0:
+                    policy.release_subcall_tokens(reserved_tokens)
                 return (
                     f"[SUBCALL_LIMIT] {exc}. "
                     "You have used all available sub-LLM calls. "
@@ -218,7 +221,10 @@ class RLM:
                 logger.debug(
                     "subcall cache hit depth=%s tokens=%s", depth, cached.usage.total_tokens
                 )
-                policy.add_subcall_tokens(cached.usage.total_tokens)
+                if reserved_tokens > 0:
+                    policy.finalize_subcall_tokens(reserved_tokens, cached.usage.total_tokens)
+                else:
+                    policy.add_subcall_tokens(cached.usage.total_tokens)
                 add_step(
                     TraceStep(
                         step_id=next_step_id(),
@@ -241,18 +247,23 @@ class RLM:
 
             # Paper-aligned: recursive subcalls run a mini-RLM instead of single LLM call
             if self.recursive_subcalls and depth < self.max_recursion_depth:
-                result_text, sub_trace = _run_recursive_subcall(
-                    text=text,
-                    adapter=effective_subcall_adapter,
-                    system_prompt=self.recursive_subcall_system_prompt,
-                    max_steps=self.recursive_subcall_max_steps,
-                    max_tokens=max_tokens,
-                    depth=depth,
-                    logger=logger,
-                    create_repl=self._create_repl,
-                    conversation_history=self.conversation_history,
-                    max_history_tokens=self.max_history_tokens,
-                )
+                try:
+                    result_text, sub_trace = _run_recursive_subcall(
+                        text=text,
+                        adapter=effective_subcall_adapter,
+                        system_prompt=self.recursive_subcall_system_prompt,
+                        max_steps=self.recursive_subcall_max_steps,
+                        max_tokens=max_tokens,
+                        depth=depth,
+                        logger=logger,
+                        create_repl=self._create_repl,
+                        conversation_history=self.conversation_history,
+                        max_history_tokens=self.max_history_tokens,
+                    )
+                except Exception:
+                    if reserved_tokens > 0:
+                        policy.release_subcall_tokens(reserved_tokens)
+                    raise
                 subcall_made = True
                 # Aggregate usage from sub-trace
                 total_tokens = sum(s.usage.total_tokens for s in sub_trace.steps if s.usage)
@@ -262,7 +273,10 @@ class RLM:
                     prompt_tokens=0, completion_tokens=0, total_tokens=total_tokens
                 )
                 try:
-                    policy.add_subcall_tokens(total_tokens)
+                    if reserved_tokens > 0:
+                        policy.finalize_subcall_tokens(reserved_tokens, total_tokens)
+                    else:
+                        policy.add_subcall_tokens(total_tokens)
                 except MaxTokensExceeded:
                     logger.warning(
                         "Token budget exceeded after recursive subcall; returning partial result"
@@ -319,15 +333,23 @@ class RLM:
                 {"role": "system", "content": self.subcall_system_prompt},
                 {"role": "user", "content": text},
             ]
-            response = effective_subcall_adapter.complete(
-                messages, max_tokens=max_tokens, temperature=0.0
-            )
+            try:
+                response = effective_subcall_adapter.complete(
+                    messages, max_tokens=max_tokens, temperature=0.0
+                )
+            except Exception:
+                if reserved_tokens > 0:
+                    policy.release_subcall_tokens(reserved_tokens)
+                raise
             subcall_made = True
             logger.debug("subcall complete depth=%s tokens=%s", depth, response.usage.total_tokens)
-            try:
-                policy.add_subcall_tokens(response.usage.total_tokens)
-            except MaxTokensExceeded:
-                logger.warning("Token budget exceeded after subcall; returning partial result")
+            if reserved_tokens > 0:
+                policy.finalize_subcall_tokens(reserved_tokens, response.usage.total_tokens)
+            else:
+                try:
+                    policy.add_subcall_tokens(response.usage.total_tokens)
+                except MaxTokensExceeded:
+                    logger.warning("Token budget exceeded after subcall; returning partial result")
             cache.set(cache_key, CacheRecord(text=response.text, usage=response.usage))
             add_step(
                 TraceStep(
@@ -462,36 +484,55 @@ class RLM:
             if not isinstance(prompts, list):
                 raise ValueError("llm_batch expects a list of prompt strings.")
 
-            # Single prompt: call subcall directly (no thread overhead)
-            if len(prompts) == 1:
-                return [subcall(prompts[0], model=model, max_tokens=max_tokens)]
+            error_message = "[ERROR] llm_batch expects a list of prompt strings."
+            results: list[str | None] = [None] * len(prompts)
 
-            # Deduplicate prompts while preserving order
+            # Validate and deduplicate prompts while preserving order.
             unique_prompts: list[str] = []
             seen_set: set[str] = set()
-            for p in prompts:
+            prompt_positions: dict[str, list[int]] = {}
+            for idx, p in enumerate(prompts):
+                if not isinstance(p, str):
+                    results[idx] = error_message
+                    continue
                 if p not in seen_set:
                     seen_set.add(p)
                     unique_prompts.append(p)
+                prompt_positions.setdefault(p, []).append(idx)
+
+            if not unique_prompts:
+                return [result or error_message for result in results]
+
+            # Single valid prompt: call subcall directly (no thread overhead)
+            if len(unique_prompts) == 1:
+                prompt = unique_prompts[0]
+                result = subcall(prompt, model=model, max_tokens=max_tokens)
+                for idx in prompt_positions[prompt]:
+                    results[idx] = result
+                return [result or error_message for result in results]
 
             unique_results: list[str | None] = [None] * len(unique_prompts)
             group_id = next_parallel_group_id()
 
+            def _estimate_subcall_token_budget(prompt: str) -> int:
+                prompt_budget = estimate_tokens(self.subcall_system_prompt) + estimate_tokens(prompt)
+                return prompt_budget + max_tokens
+
             def _process_one(idx: int, prompt: str) -> tuple[int, str]:
-                try:
-                    return (
-                        idx,
-                        subcall(
-                            prompt,
-                            model=model,
-                            max_tokens=max_tokens,
-                            parallel_group=group_id,
-                            parallel_index=idx,
-                            parallel_total=len(unique_prompts),
-                        ),
+                reserved_tokens = _estimate_subcall_token_budget(prompt)
+                policy.reserve_subcall_tokens(reserved_tokens)
+                return (
+                    idx,
+                    subcall(
+                        prompt,
+                        model=model,
+                        max_tokens=max_tokens,
+                        parallel_group=group_id,
+                        parallel_index=idx,
+                        parallel_total=len(unique_prompts),
+                        reserved_tokens=reserved_tokens,
                     )
-                except Exception as exc:
-                    return idx, f"[ERROR] {exc}"
+                )
 
             max_workers = min(self.max_concurrent_subcalls, len(unique_prompts))
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -502,9 +543,12 @@ class RLM:
                     idx, result = future.result()
                     unique_results[idx] = result
 
-            # Map back to original order (handles duplicates)
-            prompt_to_result = {p: unique_results[i] for i, p in enumerate(unique_prompts)}
-            return [prompt_to_result[p] or "" for p in prompts]
+            # Map back to original order (handles duplicates and invalid prompts)
+            for i, prompt in enumerate(unique_prompts):
+                result = unique_results[i] or ""
+                for idx in prompt_positions[prompt]:
+                    results[idx] = result
+            return [result or error_message for result in results]
 
         def ask(question: str, text: str, *, max_tokens: int | None = None) -> str:
             return subcall(f"Question: {question}\nSnippet:\n{text}", max_tokens=max_tokens)
