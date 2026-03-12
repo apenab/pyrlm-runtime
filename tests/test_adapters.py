@@ -381,6 +381,18 @@ class TestAzureOpenAIAdapter:
         }
         with patch.dict("os.environ", env, clear=True):
             adapter = AzureOpenAIAdapter(model=" gpt-5.1 ")
+            assert adapter.endpoint == "https://demo.openai.azure.com/openai/v1/chat/completions"
+            assert adapter._adapter.headers["api-key"] == "azure-key"
+            assert "Authorization" not in adapter._adapter.headers
+            adapter.close()
+
+    def test_uses_classic_deployment_url_when_endpoint_has_no_path(self) -> None:
+        env = {
+            "AZURE_OPENAI_API_KEY": " azure-key ",
+            "OPENAI_ENDPOINT": " https://demo.openai.azure.com ",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            adapter = AzureOpenAIAdapter(model=" gpt-5.1 ")
             assert (
                 adapter.endpoint
                 == "https://demo.openai.azure.com/openai/deployments/gpt-5.1/chat/completions"
