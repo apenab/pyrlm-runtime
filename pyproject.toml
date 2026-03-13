@@ -33,11 +33,11 @@ dependencies = [
     "python-dotenv>=1.0",
     "pydantic-monty>=0.0.4",
     "google-cloud-aiplatform>=1.60.0",
-    "datasets>=4.7.0",
 ]
 
 [project.optional-dependencies]
 rich = ["rich>=13.7"]
+examples = ["datasets>=4.7.0"]
 
 [project.urls]
 Homepage = "https://github.com/apenab/rlm-runtime"
@@ -47,6 +47,7 @@ Issues = "https://github.com/apenab/rlm-runtime/issues"
 [dependency-groups]
 dev = [
   "commitizen>=4.13.7",
+  "datasets>=4.7.0",
   "pytest>=8.0",
   "rich>=13.7",
   "ruff>=0.6.0",
