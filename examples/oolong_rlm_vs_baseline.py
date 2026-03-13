@@ -437,8 +437,9 @@ def _trace_diagnostics(trace: Any) -> dict[str, Any]:
                 return getattr(step, "step_id", None)
         return None
 
-    def first_nonempty(attr: str, *, kind: str | None = None) -> dict[str, Any] | None:
-        for step in steps:
+    def _find_nonempty(attr: str, *, kind: str | None = None, reverse: bool = False) -> dict[str, Any] | None:
+        seq = reversed(steps) if reverse else steps
+        for step in seq:
             if kind is not None and getattr(step, "kind", None) != kind:
                 continue
             value = getattr(step, attr, None)
@@ -450,6 +451,12 @@ def _trace_diagnostics(trace: Any) -> dict[str, Any]:
                 }
         return None
 
+    def first_nonempty(attr: str, *, kind: str | None = None) -> dict[str, Any] | None:
+        return _find_nonempty(attr, kind=kind, reverse=False)
+
+    def last_nonempty(attr: str, *, kind: str | None = None) -> dict[str, Any] | None:
+        return _find_nonempty(attr, kind=kind, reverse=True)
+
     return {
         "total_steps": len(steps),
         "first_root_call_step": first_step("root_call"),
@@ -460,7 +467,7 @@ def _trace_diagnostics(trace: Any) -> dict[str, Any]:
         "first_error": first_nonempty("error"),
         "first_stdout": first_nonempty("stdout", kind="repl_exec"),
         "first_subcall_output": first_nonempty("output", kind="subcall"),
-        "last_output": first_nonempty("output"),
+        "last_output": last_nonempty("output"),
     }
 
 

@@ -147,6 +147,8 @@ load_dotenv()
 adapter = AzureOpenAIAdapter(model="gpt-5.1")
 listener = RichTraceListener()
 
+demo_text = "SpaceX Falcon 9 launched on Jan 6 with $50M revenue. ..."
+
 output, trace = RLM(adapter=adapter, event_listener=listener).run(
     "Which launch had the largest revenue?",
     Context.from_text(demo_text),
@@ -487,22 +489,25 @@ ctx.document_lengths()         # List of doc lengths
 ### Subcalls (call sub-LLMs)
 
 ```python
-llm_query(text, model=None, max_tokens=256)
+llm_query(text, model=None, max_tokens=None)
     # Single subcall to a sub-LLM
+    # max_tokens defaults to subcall_max_tokens (256) at runtime
 
-llm_batch(prompts, model=None, max_tokens=256)
+llm_batch(prompts, model=None, max_tokens=None)
     # Process multiple prompts in parallel (always parallel, uses ThreadPoolExecutor)
+    # max_tokens defaults to subcall_max_tokens (256) at runtime
     # → Use this for independent batch operations
     # Example: llm_batch(["prompt1", "prompt2", "prompt3"])
 
-llm_query_batch(chunks, model=None, max_tokens=256, parallel=None)
+llm_query_batch(chunks, model=None, max_tokens=None, parallel=None)
     # Batch subcall over multiple chunks
+    # max_tokens defaults to subcall_max_tokens (256) at runtime
     # → Parallel if parallel_subcalls=True or parallel=True (default: sequential)
 
-ask(question, text, max_tokens=256)
+ask(question, text, max_tokens=None)
     # Convenience: ask a question about a text snippet
 
-ask_chunks(question, chunks, max_tokens=256, parallel=None)
+ask_chunks(question, chunks, max_tokens=None, parallel=None)
     # Ask the same question over multiple chunks
     # → Parallel if parallel_subcalls=True or parallel=True (default: sequential)
 
