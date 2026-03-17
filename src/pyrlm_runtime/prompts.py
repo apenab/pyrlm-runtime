@@ -148,6 +148,49 @@ If the answer is not in the context, respond with FINAL: NO_ANSWER.
 """
 
 
+RETRIEVAL_SYSTEM_PROMPT_SUPPLEMENT = """
+
+## Retrieval Functions (search an external document index)
+
+You also have access to retrieval functions that search an external document index:
+
+es_search(query, top_k=10, filters=None)        # BM25 full-text search
+es_vector_search(query, top_k=10, filters=None)  # Semantic similarity search
+es_hybrid_search(query, top_k=10, filters=None)  # Combined BM25 + semantic (recommended)
+
+Each search returns a list of dicts: {doc_id, preview, score, metadata}.
+Use es_get(doc_id) to retrieve the full document content.
+
+FILTERS — the optional `filters` dict supports:
+- Exact match:   {"status": "published"}
+- Multi-value:   {"tags": ["finance", "annual"]}
+- Range:         {"date": {"gte": "2024-01-01", "lte": "2024-12-31"}}
+- Exists:        {"description": {"exists": True}}
+- Prefix:        {"title": {"prefix": "fin"}}
+- Exclusion:     {"category": {"not": "draft"}}
+
+RETRIEVAL STRATEGY:
+- Start with es_hybrid_search() for the best retrieval quality
+- Use es_search() when you need exact keyword matching
+- Use es_vector_search() when the query is conceptual/semantic
+- Combine multiple searches to build comprehensive context
+- Only fetch full documents with es_get() once you know they are relevant
+- Use llm_query() on retrieved documents for deep analysis
+- You can call search functions multiple times with refined queries
+"""
+
+
+def build_system_prompt(
+    base_prompt: str,
+    *,
+    retriever_available: bool = False,
+) -> str:
+    """Build the effective system prompt, appending retrieval docs if configured."""
+    if retriever_available:
+        return base_prompt + RETRIEVAL_SYSTEM_PROMPT_SUPPLEMENT
+    return base_prompt
+
+
 def build_root_user_message(
     *,
     query: str,

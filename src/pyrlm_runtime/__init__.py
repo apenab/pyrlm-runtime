@@ -14,6 +14,12 @@ from .policy import (
     Policy,
     PolicyError,
 )
+from .retrieval import (
+    AsyncElasticsearchRetriever,
+    AsyncRetrieverProtocol,
+    ElasticsearchRetriever,
+    RetrieverProtocol,
+)
 from .rlm import RLM
 from .router import (
     ExecutionProfile,
@@ -26,6 +32,10 @@ from .trace import Trace, TraceStep
 
 __all__ = [
     "Context",
+    "AsyncElasticsearchRetriever",
+    "AsyncRetrieverProtocol",
+    "ElasticsearchRetriever",
+    "RetrieverProtocol",
     "PythonREPL",
     "ExecResult",
     "Policy",

@@ -24,6 +24,7 @@ src/pyrlm_runtime/
   context.py      # Context dataclass (text, documents, find, chunk, slice)
   policy.py       # Policy (step/token limits)
   prompts.py      # System prompts and user message builder
+  retrieval.py    # RetrieverProtocol + ElasticsearchRetriever
   trace.py        # Trace/TraceStep for execution logging
   cache.py        # File-based cache for subcall results
   router.py       # Router for model selection

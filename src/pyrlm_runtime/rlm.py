@@ -27,6 +27,7 @@ from .prompts import (
     RECURSIVE_SUBCALL_SYSTEM_PROMPT,
     build_root_user_message,
     build_iteration_message,
+    build_system_prompt,
 )
 from .trace import Trace, TraceStep
 
@@ -97,6 +98,10 @@ class RLM:
     # value is available.
     min_steps: int = 0
     event_listener: RLMEventListener | None = None
+    # Optional retriever for external document search (e.g. Elasticsearch).
+    # When set, es_search/es_vector_search/es_hybrid_search/es_get functions
+    # are registered in the REPL environment.
+    retriever: Any | None = None
 
     def _create_repl(self) -> REPLProtocol:
         if self.repl_backend == "python":
@@ -109,7 +114,15 @@ class RLM:
             f"Invalid repl_backend={self.repl_backend!r}. Expected 'python' or 'monty'."
         )
 
-    def run(self, query: str, context: Context) -> tuple[str, Trace]:
+    def run(self, query: str, context: Context | None = None) -> tuple[str, Trace]:
+        if context is None:
+            if self.retriever is not None:
+                context = Context.from_text("")
+            else:
+                raise ValueError(
+                    "context is required when no retriever is configured. "
+                    "Either pass a Context or set retriever on the RLM instance."
+                )
         logger = self.logger or logging.getLogger("pyrlm_runtime")
         policy = self.policy or Policy()
         cache = self.cache or FileCache(self.cache_dir)
@@ -684,6 +697,38 @@ class RLM:
 
         repl.set("SHOW_VARS", show_vars_fn)
 
+        # -- Retrieval functions (when a retriever is configured) -----------
+        _retrieval_fns: dict[str, Any] = {}
+        if self.retriever is not None:
+            _retriever = self.retriever
+
+            def es_search(
+                query: str, top_k: int = 10, filters: dict | None = None
+            ) -> list[dict]:
+                return _retriever.search(query, top_k=top_k, filters=filters)
+
+            def es_vector_search(
+                query: str, top_k: int = 10, filters: dict | None = None
+            ) -> list[dict]:
+                return _retriever.vector_search(query, top_k=top_k, filters=filters)
+
+            def es_hybrid_search(
+                query: str, top_k: int = 10, filters: dict | None = None
+            ) -> list[dict]:
+                return _retriever.hybrid_search(query, top_k=top_k, filters=filters)
+
+            def es_get(doc_id: str) -> dict:
+                return _retriever.get(doc_id)
+
+            _retrieval_fns = {
+                "es_search": es_search,
+                "es_vector_search": es_vector_search,
+                "es_hybrid_search": es_hybrid_search,
+                "es_get": es_get,
+            }
+            for name, fn in _retrieval_fns.items():
+                repl.set(name, fn)
+
         # Scaffold: mapping of every injected name → its current value.
         # Used by restore_scaffold() to undo accidental overwrites
         # (e.g. model writes `llm_query = None` or `P = "x"`).
@@ -704,6 +749,7 @@ class RLM:
             "pick_first_answer": pick_first_answer,
             "extract_after": extract_after,
             "SHOW_VARS": show_vars_fn,
+            **_retrieval_fns,
         }
         # Inform REPL backends with SHOW_VARS support which names belong to
         # the scaffold so user-facing variable dumps can hide framework internals.
@@ -837,6 +883,12 @@ class RLM:
                     return False
             return run_fallback("fallback_guard")
 
+        # Build effective system prompt (append retrieval docs when retriever is set)
+        effective_system_prompt = build_system_prompt(
+            self.system_prompt,
+            retriever_available=self.retriever is not None,
+        )
+
         # Initialize conversation history for multi-turn mode
         if self.conversation_history:
             ctx_meta = context.metadata()
@@ -853,7 +905,7 @@ class RLM:
                 max_steps=policy.max_steps,
             )
             history: list[dict[str, str]] = [
-                {"role": "system", "content": self.system_prompt},
+                {"role": "system", "content": effective_system_prompt},
                 {"role": "user", "content": initial_user_message},
             ]
 
@@ -938,7 +990,7 @@ class RLM:
                     max_steps=policy.max_steps,
                 )
                 messages = [
-                    {"role": "system", "content": self.system_prompt},
+                    {"role": "system", "content": effective_system_prompt},
                     {"role": "user", "content": user_message},
                 ]
 

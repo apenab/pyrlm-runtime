@@ -20,6 +20,7 @@ RLMs solve the long-context problem: instead of sending huge contexts directly t
   - [Router](#router)
 - [REPL Backends](#repl-backends)
 - [REPL Functions Available to the LLM](#repl-functions-available-to-the-llm)
+- [Retrieval Integration](#retrieval-integration)
 - [Parallel Subcalls](#parallel-subcalls)
 - [Multi-Turn Conversation History](#multi-turn-conversation-history)
 - [Guard Mechanisms & Fallbacks](#guard-mechanisms--fallbacks)
@@ -225,6 +226,9 @@ rlm = RLM(
     # Conversation history
     conversation_history=True,          # Multi-turn mode (default: True)
     max_history_tokens=0,               # Token budget for history (0=unlimited)
+
+    # Retrieval
+    retriever=None,                     # RetrieverProtocol impl (e.g. ElasticsearchRetriever)
 
     # Subcalls
     subcall_adapter=None,               # Separate (cheaper) adapter for subcalls
@@ -525,12 +529,61 @@ pick_first_answer(answers)
   - **Sequential by default** (unless `RLM(parallel_subcalls=True)` or `ask_chunks(..., parallel=True)`)
   - **Parallel when enabled** (limited to `max_concurrent_subcalls`, default 10 workers)
 
+### Retrieval (when retriever is configured)
+
+```python
+es_search(query, top_k=10, filters=None)
+    # BM25 full-text search → list of {doc_id, preview, score, metadata}
+
+es_vector_search(query, top_k=10, filters=None)
+    # Semantic similarity search → list of {doc_id, preview, score, metadata}
+
+es_hybrid_search(query, top_k=10, filters=None)
+    # Combined BM25 + semantic (recommended) → list of {doc_id, preview, score, metadata}
+
+es_get(doc_id)
+    # Fetch full document → {doc_id, content, metadata}
+```
+
 ### Deterministic extraction
 
 ```python
 extract_after(marker, max_len=128)
     # Extract text after a marker without using a subcall (fast, 0 tokens)
 ```
+
+## Retrieval Integration
+
+For large corpora that don't fit in memory, the RLM can search external document indexes directly from the REPL loop. See the detailed architecture guide: **[docs/RETRIEVAL.md](docs/RETRIEVAL.md)**
+
+### Quick Setup
+
+```python
+from pyrlm_runtime import RLM
+from pyrlm_runtime.adapters import OpenAICompatAdapter
+from pyrlm_runtime.retrieval import ElasticsearchRetriever
+
+retriever = ElasticsearchRetriever(
+    host="https://my-cluster.es.cloud.com",
+    api_key="xxx",
+    index="pdf_corpus",
+    embedding_model="text-embedding-3-small",
+)
+
+rlm = RLM(adapter=OpenAICompatAdapter(model="gpt-5"), retriever=retriever)
+answer, trace = rlm.run("Who signed document X?")  # No context needed
+```
+
+When a retriever is configured, four functions become available in the REPL:
+
+```python
+es_search(query, top_k=10, filters=None)        # BM25 keyword search
+es_vector_search(query, top_k=10, filters=None)  # Semantic similarity
+es_hybrid_search(query, top_k=10, filters=None)  # Combined (recommended)
+es_get(doc_id)                                    # Fetch full document
+```
+
+The retrieval layer is **backend-agnostic**: any object implementing the `RetrieverProtocol` (with `search`, `vector_search`, `hybrid_search`, `get` methods) works as a drop-in backend.
 
 ## Parallel Subcalls
 
@@ -630,6 +683,7 @@ LLM_BASE_URL="http://localhost:11434/v1"  # Ollama
 | Use case                       | Configuration                                                     |
 | ------------------------------ | ----------------------------------------------------------------- |
 | Small context (<8K chars)      | Use `SmartRouter` — it will pick baseline automatically           |
+| Large corpus (10K+ docs)       | `RLM(adapter, retriever=ElasticsearchRetriever(...))` — search on demand |
 | Large context (>100K chars)    | `RLM(adapter, conversation_history=True, parallel_subcalls=True)` |
 | Batch many independent prompts | Use `llm_batch(prompts)` — always parallel, no config needed      |
 | Cost-sensitive                 | Use a cheaper `subcall_adapter` for subcalls                      |
