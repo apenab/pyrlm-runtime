@@ -766,163 +766,6 @@ def test_es_find_pages_text_in_repl() -> None:
     assert "logical-doc-A__p10" in output
 
 
-@pytest.mark.skip(reason="es_extract_comparative_metric not yet implemented")
-def test_es_extract_comparative_metric_in_repl() -> None:
-    retriever = ExactPageRetriever()
-    adapter = FakeAdapter(
-        script=[
-            (
-                'row = es_extract_comparative_metric(\n'
-                '    "logical-doc-A",\n'
-                '    "Importe neto de la cifra de negocios",\n'
-                '    aliases=["Importe de la cifra de negocios"],\n'
-                ')\n'
-                'print(row)\n'
-                'answer = f"{row[\'recent_amount_raw\']}|{row[\'page_strategy\']}"'
-            ),
-            "FINAL_VAR: answer",
-        ]
-    )
-    adapter.add_rule(
-        r"You are a sub-LLM[\s\S]*Metrica objetivo: Importe neto de la cifra de negocios",
-        (
-            '{"entity_name":"Eurotransac","line_item_found":true,'
-            '"line_item_label":"Importe neto de la cifra de negocio",'
-            '"recent_year":2024,"recent_amount_raw":"982.160",'
-            '"previous_year":2023,"previous_amount_raw":"786.063",'
-            '"unit_hint":"Miles de euros","pages":[10],'
-            '"evidence":"fila","confidence":"high","reason":"ok"}'
-        ),
-        regex=True,
-    )
-
-    runtime = RLM(adapter=adapter, retriever=retriever)
-    output, trace = runtime.run("test", Context.from_text(""))
-
-    assert output == "982.160|exact"
-
-
-@pytest.mark.skip(reason="comparative_metric_corpus_report not yet implemented")
-def test_comparative_metric_corpus_report_in_repl() -> None:
-    retriever = ExactPageRetriever()
-    adapter = FakeAdapter(
-        script=[
-            (
-                'report = comparative_metric_corpus_report(\n'
-                '    ["logical-doc-A"],\n'
-                '    "Importe neto de la cifra de negocios",\n'
-                '    aliases=["Importe de la cifra de negocios"],\n'
-                ')\n'
-                'print(report)\n'
-            ),
-            "FINAL_VAR: report",
-        ]
-    )
-    adapter.add_rule(
-        r"You are a sub-LLM[\s\S]*Metrica objetivo: Importe neto de la cifra de negocios",
-        (
-            '{"entity_name":"Eurotransac","line_item_found":true,'
-            '"line_item_label":"Importe neto de la cifra de negocio",'
-            '"recent_year":2024,"recent_amount_raw":"982.160",'
-            '"previous_year":2023,"previous_amount_raw":"786.063",'
-            '"unit_hint":"Miles de euros","pages":[10],'
-            '"evidence":"fila","confidence":"high","reason":"ok"}'
-        ),
-        regex=True,
-    )
-
-    runtime = RLM(adapter=adapter, retriever=retriever)
-    output, trace = runtime.run("test", Context.from_text(""))
-
-    assert "1. Eurotransac" in output
-    assert "Documento fuente: logical-doc-A" in output
-    assert "Variación porcentual:" in output
-
-
-@pytest.mark.skip(reason="es_extract_comparative_metric not yet implemented")
-def test_es_extract_comparative_metric_prefers_clean_single_page_candidate() -> None:
-    retriever = MultiCandidateComparativeRetriever()
-    adapter = FakeAdapter(
-        script=[
-            (
-                'row = es_extract_comparative_metric(\n'
-                '    "logical-doc-eizar",\n'
-                '    "Importe neto de la cifra de negocios",\n'
-                '    aliases=["Importe de la cifra de negocios"],\n'
-                ')\n'
-                'answer = f"{row[\'selected_pages\']}|{row[\'recent_amount_raw\']}|{parse_amount_text(row[\'recent_amount_raw\'])}"\n'
-                'print(answer)\n'
-            ),
-            "FINAL_VAR: answer",
-        ]
-    )
-    adapter.add_rule(
-        r"You are a sub-LLM[\s\S]*logical-doc-eizar pages=\[6\]",
-        (
-            '{"entity_name":"EIZAR","line_item_found":true,'
-            '"line_item_label":"Importe de la cifra de negocios",'
-            '"recent_year":2024,"recent_amount_raw":"179.964.152 175.200.881",'
-            '"previous_year":2023,"previous_amount_raw":"180.073.791 174.718.771 5.355.020",'
-            '"unit_hint":"euros","pages":[6],"evidence":"tabla ruidosa","confidence":"low","reason":"ocr"}'
-        ),
-        regex=True,
-    )
-    adapter.add_rule(
-        r"You are a sub-LLM[\s\S]*logical-doc-eizar pages=\[72\]",
-        (
-            '{"entity_name":"EIZAR","line_item_found":true,'
-            '"line_item_label":"Importe neto de la cifra de negocios",'
-            '"recent_year":2024,"recent_amount_raw":"179.964.152",'
-            '"previous_year":2023,"previous_amount_raw":"180.073.791",'
-            '"unit_hint":"euros","pages":[72],"evidence":"fila total","confidence":"high","reason":"ok"}'
-        ),
-        regex=True,
-    )
-    adapter.add_rule(
-        r"You are a sub-LLM[\s\S]*logical-doc-eizar pages=\[(?:6, 72|72, 6)\]",
-        (
-            '{"entity_name":"EIZAR","line_item_found":true,'
-            '"line_item_label":"Importe neto de la cifra de negocios",'
-            '"recent_year":2024,"recent_amount_raw":"179.964.152 175.200.881",'
-            '"previous_year":2023,"previous_amount_raw":"180.073.791 174.718.771 5.355.020",'
-            '"unit_hint":"euros","pages":[6,72],"evidence":"mezcla","confidence":"low","reason":"ocr"}'
-        ),
-        regex=True,
-    )
-
-    runtime = RLM(adapter=adapter, retriever=retriever)
-    output, trace = runtime.run("test", Context.from_text(""))
-
-    assert output == "[72]|179.964.152|179964152"
-
-
-@pytest.mark.skip(reason="es_extract_comparative_metric not yet implemented")
-def test_es_extract_comparative_metric_reports_incomplete_index() -> None:
-    retriever = IncompleteLogicalDocRetriever()
-    adapter = FakeAdapter(
-        script=[
-            (
-                'row = es_extract_comparative_metric(\n'
-                '    "logical-doc-incomplete",\n'
-                '    "Importe neto de la cifra de negocios",\n'
-                ')\n'
-                'answer = (\n'
-                '    f"{row[\'index_incomplete\']}|{row[\'indexed_page_count\']}|"\n'
-                '    f"{row[\'expected_page_count\']}|{row[\'page_strategy\']}|{row[\'reason\']}"\n'
-                ')\n'
-                'print(answer)'
-            ),
-            "FINAL_VAR: answer",
-        ]
-    )
-
-    runtime = RLM(adapter=adapter, retriever=retriever)
-    output, trace = runtime.run("test", Context.from_text(""))
-
-    assert output.startswith("True|10|140|no_pages|")
-    assert "incomplete" in output.lower()
-
-
 def test_search_result_schema_diagnostics_log_distinguishes_page_and_logical_doc_ids(
     caplog,
 ) -> None:
@@ -986,7 +829,6 @@ def test_context_required_without_retriever() -> None:
         runtime.run("test")
 
 
-@pytest.mark.skip(reason="es_extract_comparative_metric not yet implemented")
 def test_system_prompt_includes_retrieval_docs() -> None:
     """When retriever is set, system prompt should include retrieval function docs."""
     retriever = InMemoryRetriever()
@@ -995,7 +837,6 @@ def test_system_prompt_includes_retrieval_docs() -> None:
     runtime = RLM(adapter=adapter, retriever=retriever)
     runtime.run("test")
 
-    # Check that the adapter received a system prompt with retrieval docs
     last_call = adapter.call_log[-1]
     system_msg = next(m for m in last_call if m["role"] == "system")
     assert "es_search" in system_msg["content"]
@@ -1004,7 +845,6 @@ def test_system_prompt_includes_retrieval_docs() -> None:
     assert "es_hybrid_search_in_doc" in system_msg["content"]
     assert "es_find_pages" in system_msg["content"]
     assert "es_find_pages_text" in system_msg["content"]
-    assert "es_extract_comparative_metric" in system_msg["content"]
     assert "es_get" in system_msg["content"]
     assert "es_get_text" in system_msg["content"]
     assert "page_doc_id" in system_msg["content"]
@@ -1013,9 +853,6 @@ def test_system_prompt_includes_retrieval_docs() -> None:
     assert "llm_batch_json" in system_msg["content"]
     assert "llm_query_records" in system_msg["content"]
     assert "llm_batch_records" in system_msg["content"]
-    assert "llm_extract_comparative_metric" in system_msg["content"]
-    assert "parse_amount_text" in system_msg["content"]
-    assert '"content"' in system_msg["content"]
 
 
 def test_system_prompt_excludes_retrieval_docs_without_retriever() -> None:
@@ -1751,7 +1588,6 @@ def test_retrieval_functions_registered_in_repl_monty() -> None:
 
 
 @pytest.mark.skipif(not MONTY_AVAILABLE, reason="pydantic-monty not installed")
-@pytest.mark.skip(reason="pydantic-monty 0.0.8 broke external_functions API")
 def test_es_get_in_repl_monty() -> None:
     """es_get() should retrieve full document content in the Monty REPL."""
     retriever = InMemoryRetriever({"doc1": "Full document content"})
