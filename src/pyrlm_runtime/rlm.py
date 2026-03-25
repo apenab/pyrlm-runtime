@@ -462,6 +462,7 @@ class RLM:
                         create_repl=self._create_repl,
                         conversation_history=self.conversation_history,
                         max_history_tokens=self.max_history_tokens,
+                        log_truncate_code=self.log_truncate_code,
                     )
                 except Exception:
                     if reserved_tokens > 0:
@@ -2418,6 +2419,7 @@ def _run_recursive_subcall(
     create_repl: Callable[[], REPLProtocol] | None = None,
     conversation_history: bool = True,
     max_history_tokens: int = 0,
+    log_truncate_code: int = 2000,
 ) -> tuple[str, Trace]:
     """Run a mini-RLM loop for a recursive subcall.
 
@@ -2469,7 +2471,7 @@ def _run_recursive_subcall(
                 kind="subcall",
                 depth=depth + 1,
                 prompt_summary=_truncate(query_text, 240),
-                output=_truncate(response.text, self.log_truncate_code),
+                output=_truncate(response.text, log_truncate_code),
                 usage=response.usage,
                 elapsed=time.perf_counter() - subcall_started,
                 cache_hit=False,
@@ -2558,7 +2560,7 @@ def _run_recursive_subcall(
                 kind="root_call",
                 depth=depth,
                 prompt_summary=_truncate(prompt_summary, 240),
-                code=_truncate(response.text, self.log_truncate_code),
+                code=_truncate(response.text, log_truncate_code),
                 output=response.text,
                 usage=response.usage,
                 elapsed=root_elapsed,
@@ -2611,7 +2613,7 @@ def _run_recursive_subcall(
                 step_id=next_step_id(),
                 kind="repl_exec",
                 depth=depth,
-                code=_truncate(code, self.log_truncate_code),
+                code=_truncate(code, log_truncate_code),
                 stdout=result.stdout,
                 error=result.error,
                 elapsed=time.perf_counter() - repl_started,
