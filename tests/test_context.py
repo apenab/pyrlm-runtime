@@ -60,6 +60,15 @@ def test_chunk_documents() -> None:
     assert chunks[2] == (4, 5, ["Doc E"])
 
 
+def test_empty_document_list_reports_zero_documents() -> None:
+    ctx = Context.from_documents([])
+
+    assert ctx.context_type == "document_list"
+    assert ctx.num_documents() == 0
+    assert ctx.document_lengths() == []
+    assert ctx.chunk_documents() == []
+
+
 def test_metadata() -> None:
     """Test metadata generation for context."""
     # String context
@@ -77,6 +86,12 @@ def test_metadata() -> None:
     assert meta_docs["context_type"] == "document_list"
     assert meta_docs["num_documents"] == 2
     assert meta_docs["document_lengths"] == [5, 21]
+
+    empty_docs = Context.from_documents([])
+    meta_empty = empty_docs.metadata()
+    assert meta_empty["context_type"] == "document_list"
+    assert meta_empty["num_documents"] == 0
+    assert "document_lengths" not in meta_empty
 
 
 # ── ctx.page() tests ────────────────────────────────────────────────

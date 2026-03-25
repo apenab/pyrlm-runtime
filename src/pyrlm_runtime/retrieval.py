@@ -9,13 +9,18 @@ another.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import logging
 import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +203,227 @@ def _cache_key(*parts: Any) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def _is_rrf_license_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    if "reciprocal rank fusion" in text:
+        return True
+    return "rrf" in text and (
+        "license" in text or "non-compliant" in text or "security_exception" in text
+    )
+
+
+def _is_id_sort_fielddata_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "fielddata access on the _id field is disallowed" in text
+        or ("_id field" in text and "fielddata" in text and "disallowed" in text)
+    )
+
+
+def _logical_doc_search_body(
+    logical_doc_id: str,
+    *,
+    max_pages: int,
+    include_id_sort: bool,
+    page_numbers: list[int] | None = None,
+) -> dict[str, Any]:
+    filters: list[dict[str, Any]] = [
+        {"term": {"doc_id": logical_doc_id}},
+    ]
+    if page_numbers:
+        filters.append({"terms": {"page_num": page_numbers}})
+    sort: list[dict[str, Any]] = [
+        {"page_num": {"order": "asc", "missing": "_last"}},
+    ]
+    if include_id_sort:
+        sort.append({"_id": {"order": "asc"}})
+    return {
+        "query": {
+            "bool": {
+                "filter": filters
+            }
+        },
+        "sort": sort,
+        "size": max_pages,
+        "_source": True,  # full source needed for page stitching
+    }
+
+
+def _expanded_page_numbers(
+    pages: list[int] | None,
+    *,
+    radius: int,
+    max_pages: int,
+) -> list[int] | None:
+    if not pages:
+        return None
+    expanded: set[int] = set()
+    safe_radius = max(radius, 0)
+    for page in pages:
+        if not isinstance(page, int):
+            continue
+        start = max(1, page - safe_radius)
+        end = page + safe_radius
+        for candidate in range(start, end + 1):
+            expanded.add(candidate)
+    ordered = sorted(expanded)
+    if max_pages > 0:
+        ordered = ordered[:max_pages]
+    return ordered
+
+
+def _reciprocal_rank_fuse(
+    result_sets: list[list[dict[str, Any]]],
+    *,
+    top_k: int,
+    rank_constant: int = 60,
+) -> list[dict[str, Any]]:
+    fused_scores: dict[str, float] = {}
+    fused_results: dict[str, dict[str, Any]] = {}
+    first_seen: dict[str, int] = {}
+    next_order = 0
+
+    for results in result_sets:
+        for rank, result in enumerate(results, start=1):
+            doc_id = str(result.get("doc_id", ""))
+            if not doc_id:
+                continue
+            if doc_id not in fused_results:
+                fused_results[doc_id] = {
+                    **result,
+                    "metadata": dict(result.get("metadata", {})),
+                }
+                first_seen[doc_id] = next_order
+                next_order += 1
+            fused_scores[doc_id] = fused_scores.get(doc_id, 0.0) + 1.0 / (rank_constant + rank)
+
+    reranked: list[dict[str, Any]] = []
+    for doc_id, result in fused_results.items():
+        fused = dict(result)
+        fused["score"] = fused_scores[doc_id]
+        reranked.append(fused)
+
+    reranked.sort(key=lambda item: (-item["score"], first_seen[item["doc_id"]]))
+    return reranked[:top_k]
+
+
+def _stitch_logical_document(
+    *,
+    logical_doc_id: str,
+    hits: list[dict[str, Any]],
+    content_field: str,
+    vector_field: str,
+) -> dict[str, Any]:
+    """Combine page-level hits into one logical document payload."""
+
+    def _coerce_source_pages(raw: Any) -> list[int]:
+        if not isinstance(raw, list):
+            return []
+        return [page for page in raw if isinstance(page, int) and page > 0]
+
+    def _page_sort_key(hit: dict[str, Any]) -> tuple[int, str]:
+        source = hit.get("_source", {})
+        page_num = source.get("page_num")
+        if isinstance(page_num, int):
+            return (page_num, str(hit.get("_id", "")))
+        return (10**9, str(hit.get("_id", "")))
+
+    ordered_hits = sorted(hits, key=_page_sort_key)
+    first_source = ordered_hits[0].get("_source", {})
+    metadata = {
+        k: v for k, v in first_source.items() if k not in {content_field, vector_field}
+    }
+    metadata["doc_id"] = logical_doc_id
+    expected_page_count = metadata.get("page_count")
+    if not isinstance(expected_page_count, int) or expected_page_count <= 0:
+        expected_page_count = None
+
+    page_doc_ids: list[str] = []
+    source_pages_seen: set[int] = set()
+    parts: list[str] = []
+    for hit in ordered_hits:
+        source = hit.get("_source", {})
+        page_doc_id = str(hit.get("_id", ""))
+        if page_doc_id:
+            page_doc_ids.append(page_doc_id)
+        page_num = source.get("page_num")
+        hit_source_pages = _coerce_source_pages(source.get("source_pages"))
+        if hit_source_pages:
+            source_pages_seen.update(hit_source_pages)
+        elif isinstance(page_num, int):
+            source_pages_seen.add(page_num)
+        content = source.get(content_field, "")
+        if isinstance(page_num, int):
+            parts.append(f"<!-- Page {page_num} -->\n{content}")
+        else:
+            parts.append(str(content))
+
+    metadata["page_doc_ids"] = page_doc_ids
+    chunk_count = len(page_doc_ids)
+    indexed_source_page_count = len(source_pages_seen) if source_pages_seen else chunk_count
+    metadata["chunk_count"] = chunk_count
+    metadata["indexed_source_page_count"] = indexed_source_page_count
+    metadata["indexed_page_count"] = indexed_source_page_count
+    if expected_page_count is not None:
+        metadata["expected_page_count"] = expected_page_count
+        metadata["page_count"] = expected_page_count
+        metadata["index_incomplete"] = indexed_source_page_count < expected_page_count
+    else:
+        metadata["page_count"] = indexed_source_page_count
+        metadata["index_incomplete"] = False
+    if source_pages_seen:
+        metadata["source_pages"] = sorted(source_pages_seen)
+
+    return {
+        "doc_id": logical_doc_id,
+        "logical_doc_id": logical_doc_id,
+        "content": "\n\n".join(parts),
+        "metadata": metadata,
+    }
+
+
+def _disable_google_ssl_verify() -> None:
+    """Disable SSL verification for Google auth/API transports."""
+    import requests
+    import urllib3
+
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    original_request = requests.Session.request
+
+    def _request_no_verify(self: requests.Session, method: Any, url: Any, **kwargs: Any) -> Any:
+        kwargs.setdefault("verify", False)
+        return original_request(self, method, url, **kwargs)
+
+    requests.Session.request = _request_no_verify  # type: ignore[method-assign]
+
+
+def _embed_vertexai_query(
+    text: str,
+    *,
+    model: str,
+    ssl_verify: bool = True,
+) -> list[float]:
+    """Embed a short query via Vertex AI using ADC credentials."""
+    try:
+        import vertexai
+        from vertexai.preview.language_models import TextEmbeddingModel
+    except ImportError as exc:
+        raise ImportError(
+            "google-cloud-aiplatform is required for Vertex AI embeddings. "
+            "Install it with: pip install google-cloud-aiplatform"
+        ) from exc
+
+    if not ssl_verify:
+        _disable_google_ssl_verify()
+
+    vertexai.init()
+    embedding_model = TextEmbeddingModel.from_pretrained(model)
+    embeddings = embedding_model.get_embeddings([text])
+    if not embeddings:
+        raise RuntimeError("Vertex AI returned no embedding vectors")
+    return list(embeddings[0].values)
+
+
 # ---------------------------------------------------------------------------
 # Protocol
 # ---------------------------------------------------------------------------
@@ -376,14 +602,20 @@ class ElasticsearchRetriever:
     """
 
     host: str
-    api_key: str
+    api_key: str = field(repr=False)
     index: str
     content_field: str = "content"
     vector_field: str = "embedding"
+    embedding_provider: str = "openai"
     embedding_model: str | None = None
-    embedding_api_key: str | None = None
+    embedding_api_key: str | None = field(default=None, repr=False)
     embedding_base_url: str = "https://api.openai.com/v1"
+    embedding_ssl_verify: bool = True
     preview_length: int = 500
+
+    # Proxy / TLS
+    es_proxy: str | None = None
+    verify_certs: bool = False
 
     # Cache configuration
     cache_embeddings: bool = True
@@ -396,8 +628,17 @@ class ElasticsearchRetriever:
     _client: Any = field(default=None, init=False, repr=False)
     _embedding_cache: _LRUCache | None = field(default=None, init=False, repr=False)
     _result_cache: _TTLCache | None = field(default=None, init=False, repr=False)
+    _supports_rrf: bool | None = field(default=None, init=False, repr=False)
+    _supports_id_secondary_sort: bool | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        if self.cache_embeddings and self.embedding_cache_size <= 0:
+            raise ValueError("embedding_cache_size must be > 0 when cache_embeddings is enabled")
+        if self.cache_results:
+            if self.result_cache_size <= 0:
+                raise ValueError("result_cache_size must be > 0 when cache_results is enabled")
+            if self.result_cache_ttl <= 0:
+                raise ValueError("result_cache_ttl must be > 0 when cache_results is enabled")
         if self.cache_embeddings:
             self._embedding_cache = _LRUCache(self.embedding_cache_size)
         if self.cache_results:
@@ -418,7 +659,31 @@ class ElasticsearchRetriever:
                 "ElasticsearchRetriever.  Install it with: "
                 "pip install elasticsearch"
             ) from exc
-        self._client = Elasticsearch(self.host, api_key=self.api_key)
+
+        kwargs: dict[str, Any] = {"hosts": [self.host]}
+        if self.api_key:
+            kwargs["api_key"] = self.api_key
+
+        if self.es_proxy:
+            from elastic_transport import RequestsHttpNode
+
+            proxy_url = self.es_proxy
+
+            class _ProxyNode(RequestsHttpNode):
+                def __init__(self_node, config: Any) -> None:
+                    super().__init__(config)
+                    self_node.session.proxies.update({
+                        "http": proxy_url,
+                        "https": proxy_url,
+                    })
+
+            kwargs["node_class"] = _ProxyNode
+            kwargs["verify_certs"] = False
+        else:
+            kwargs["verify_certs"] = self.verify_certs
+
+        kwargs["ssl_show_warn"] = False
+        self._client = Elasticsearch(**kwargs)
         return self._client
 
     def _preview(self, text: str) -> str:
@@ -426,18 +691,47 @@ class ElasticsearchRetriever:
             return text
         return text[: self.preview_length] + "…"
 
+    def _hit_to_document(self, hit: dict[str, Any]) -> dict[str, Any]:
+        source = hit.get("_source", {})
+        content = source.get(self.content_field, "")
+        metadata = {
+            k: v for k, v in source.items() if k != self.content_field and k != self.vector_field
+        }
+        result = {
+            "doc_id": hit["_id"],
+            "page_doc_id": hit["_id"],
+            "content": content,
+            "metadata": metadata,
+        }
+        logical_doc_id = metadata.get("doc_id")
+        if logical_doc_id is not None:
+            result["logical_doc_id"] = logical_doc_id
+        page_num = metadata.get("page_num")
+        if page_num is not None:
+            result["page_num"] = page_num
+        return result
+
     def _hit_to_result(self, hit: dict[str, Any]) -> dict[str, Any]:
         source = hit.get("_source", {})
         content = source.get(self.content_field, "")
         metadata = {
             k: v for k, v in source.items() if k != self.content_field and k != self.vector_field
         }
-        return {
-            "doc_id": hit["_id"],
+        page_doc_id = hit["_id"]
+        result = {
+            "doc_id": page_doc_id,
+            "page_doc_id": page_doc_id,
             "preview": self._preview(content),
             "score": hit.get("_score", 0.0),
             "metadata": metadata,
         }
+        logical_doc_id = metadata.get("doc_id")
+        if logical_doc_id is not None:
+            result["logical_doc_id"] = logical_doc_id
+        page_num = metadata.get("page_num")
+        if page_num is not None:
+            result["page_num"] = page_num
+        return result
 
     def _embed(self, text: str) -> list[float]:
         """Embed *text* via an OpenAI-compatible ``/embeddings`` endpoint.
@@ -451,28 +745,41 @@ class ElasticsearchRetriever:
 
         # Check embedding cache
         if self._embedding_cache is not None:
-            key = _cache_key(text, self.embedding_model)
+            key = _cache_key(
+                text,
+                self.embedding_provider,
+                self.embedding_model,
+                self.embedding_base_url,
+                self.embedding_ssl_verify,
+            )
             cached = self._embedding_cache.get(key)
             if cached is not None:
                 return cached
 
-        import os
-        import urllib.request
+        if self.embedding_provider == "vertexai":
+            vector = _embed_vertexai_query(
+                text,
+                model=self.embedding_model,
+                ssl_verify=self.embedding_ssl_verify,
+            )
+        else:
+            import os
+            import urllib.request
 
-        api_key = self.embedding_api_key or os.environ.get("OPENAI_API_KEY", "")
-        url = f"{self.embedding_base_url.rstrip('/')}/embeddings"
-        payload = json.dumps({"input": text, "model": self.embedding_model}).encode()
-        req = urllib.request.Request(
-            url,
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
-        )
-        with urllib.request.urlopen(req) as resp:
-            body = json.loads(resp.read())
-        vector = body["data"][0]["embedding"]
+            api_key = self.embedding_api_key or os.environ.get("OPENAI_API_KEY", "")
+            url = f"{self.embedding_base_url.rstrip('/')}/embeddings"
+            payload = json.dumps({"input": text, "model": self.embedding_model}).encode()
+            req = urllib.request.Request(
+                url,
+                data=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=30.0) as resp:
+                body = json.loads(resp.read())
+            vector = body["data"][0]["embedding"]
 
         # Store in embedding cache
         if self._embedding_cache is not None:
@@ -508,6 +815,17 @@ class ElasticsearchRetriever:
         if self._result_cache is not None:
             self._result_cache.clear()
 
+    def _hybrid_search_local(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        filters: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        keyword_results = self.search(query, top_k=top_k, filters=filters)
+        vector_results = self.vector_search(query, top_k=top_k, filters=filters)
+        return _reciprocal_rank_fuse([keyword_results, vector_results], top_k=top_k)
+
     # ------------------------------------------------------------------
     # RetrieverProtocol methods
     # ------------------------------------------------------------------
@@ -525,6 +843,7 @@ class ElasticsearchRetriever:
 
         es = self._get_client()
         filter_clauses, must_not_clauses = _build_filter_clauses(filters)
+        source_excludes = {"excludes": [self.vector_field]}
         body: dict[str, Any] = {
             "query": {
                 "bool": {
@@ -532,7 +851,7 @@ class ElasticsearchRetriever:
                 }
             },
             "size": top_k,
-            "_source": True,
+            "_source": source_excludes,
         }
         _apply_bool_filter(body, "query", filter_clauses, must_not_clauses)
         resp = es.search(index=self.index, body=body)
@@ -554,6 +873,7 @@ class ElasticsearchRetriever:
         es = self._get_client()
         query_vector = self._embed(query)
         filter_clauses, must_not_clauses = _build_filter_clauses(filters)
+        source_excludes = {"excludes": [self.vector_field]}
         body: dict[str, Any] = {
             "knn": {
                 "field": self.vector_field,
@@ -561,7 +881,7 @@ class ElasticsearchRetriever:
                 "k": top_k,
                 "num_candidates": max(top_k * 2, 50),
             },
-            "_source": True,
+            "_source": source_excludes,
         }
         _apply_bool_filter(body, "knn", filter_clauses, must_not_clauses)
         resp = es.search(index=self.index, body=body)
@@ -580,9 +900,15 @@ class ElasticsearchRetriever:
         if cached is not None:
             return cached
 
+        if self._supports_rrf is False:
+            results = self._hybrid_search_local(query, top_k=top_k, filters=filters)
+            self._store_results("hybrid_search", query, top_k, filters, results)
+            return results
+
         es = self._get_client()
         query_vector = self._embed(query)
         filter_clauses, must_not_clauses = _build_filter_clauses(filters)
+        source_excludes = {"excludes": [self.vector_field]}
         body: dict[str, Any] = {
             "query": {
                 "bool": {
@@ -597,12 +923,25 @@ class ElasticsearchRetriever:
             },
             "rank": {"rrf": {}},
             "size": top_k,
-            "_source": True,
+            "_source": source_excludes,
         }
         # Apply filters to BOTH the BM25 query AND the kNN clause (pre-filtering)
         _apply_bool_filter(body, "query", filter_clauses, must_not_clauses)
         _apply_bool_filter(body, "knn", filter_clauses, must_not_clauses)
-        resp = es.search(index=self.index, body=body)
+        try:
+            resp = es.search(index=self.index, body=body)
+        except Exception as exc:
+            if not _is_rrf_license_error(exc):
+                raise
+            self._supports_rrf = False
+            logger.warning(
+                "Elasticsearch rank.rrf is unavailable for index '%s'; falling back to local RRF fusion",
+                self.index,
+            )
+            results = self._hybrid_search_local(query, top_k=top_k, filters=filters)
+            self._store_results("hybrid_search", query, top_k, filters, results)
+            return results
+        self._supports_rrf = True
         results = [self._hit_to_result(hit) for hit in resp["hits"]["hits"]]
         self._store_results("hybrid_search", query, top_k, filters, results)
         return results
@@ -610,16 +949,112 @@ class ElasticsearchRetriever:
     def get(self, doc_id: str) -> dict[str, Any]:
         es = self._get_client()
         resp = es.get(index=self.index, id=doc_id)
-        source = resp.get("_source", {})
-        content = source.get(self.content_field, "")
-        metadata = {
-            k: v for k, v in source.items() if k != self.content_field and k != self.vector_field
-        }
-        return {
-            "doc_id": resp["_id"],
-            "content": content,
-            "metadata": metadata,
-        }
+        return self._hit_to_document(resp)
+
+    def get_pages(
+        self,
+        logical_doc_id: str,
+        *,
+        pages: list[int] | None = None,
+        radius: int = 0,
+        max_pages: int = 20,
+    ) -> list[dict[str, Any]]:
+        es = self._get_client()
+        include_id_sort = self._supports_id_secondary_sort is not False
+        page_numbers = _expanded_page_numbers(pages, radius=radius, max_pages=max_pages)
+        body = _logical_doc_search_body(
+            logical_doc_id,
+            max_pages=max_pages,
+            include_id_sort=include_id_sort,
+            page_numbers=page_numbers,
+        )
+        try:
+            resp = es.search(index=self.index, body=body)
+            if include_id_sort:
+                self._supports_id_secondary_sort = True
+        except Exception as exc:
+            if not include_id_sort or not _is_id_sort_fielddata_error(exc):
+                raise
+            self._supports_id_secondary_sort = False
+            logger.debug(
+                "Elasticsearch _id secondary sort is unavailable for index '%s'; "
+                "falling back to page_num-only sort for page retrieval",
+                self.index,
+            )
+            body = _logical_doc_search_body(
+                logical_doc_id,
+                max_pages=max_pages,
+                include_id_sort=False,
+                page_numbers=page_numbers,
+            )
+            resp = es.search(index=self.index, body=body)
+        hits = resp.get("hits", {}).get("hits", [])
+        return [self._hit_to_document(hit) for hit in hits]
+
+    def get_pages_text(
+        self,
+        logical_doc_id: str,
+        *,
+        pages: list[int] | None = None,
+        radius: int = 0,
+        max_pages: int = 20,
+    ) -> str:
+        docs = self.get_pages(
+            logical_doc_id,
+            pages=pages,
+            radius=radius,
+            max_pages=max_pages,
+        )
+        parts: list[str] = []
+        for doc in docs:
+            page_num = doc.get("page_num")
+            content = doc.get("content", "")
+            if isinstance(page_num, int):
+                parts.append(f"<!-- Page {page_num} -->\n{content}")
+            else:
+                parts.append(str(content))
+        return "\n\n".join(parts)
+
+    def get_logical_document(self, logical_doc_id: str, *, max_pages: int = 2000) -> dict[str, Any]:
+        """Fetch and stitch all indexed pages for a logical base document id."""
+
+        es = self._get_client()
+        include_id_sort = self._supports_id_secondary_sort is not False
+        body = _logical_doc_search_body(
+            logical_doc_id,
+            max_pages=max_pages,
+            include_id_sort=include_id_sort,
+            page_numbers=None,
+        )
+        try:
+            resp = es.search(index=self.index, body=body)
+            if include_id_sort:
+                self._supports_id_secondary_sort = True
+        except Exception as exc:
+            if not include_id_sort or not _is_id_sort_fielddata_error(exc):
+                raise
+            self._supports_id_secondary_sort = False
+            logger.debug(
+                "Elasticsearch _id secondary sort is unavailable for index '%s'; "
+                "falling back to page_num-only sort for logical document reconstruction",
+                self.index,
+            )
+            body = _logical_doc_search_body(
+                logical_doc_id,
+                max_pages=max_pages,
+                include_id_sort=False,
+                page_numbers=None,
+            )
+            resp = es.search(index=self.index, body=body)
+        hits = resp.get("hits", {}).get("hits", [])
+        if not hits:
+            raise KeyError(f"logical document not found: {logical_doc_id}")
+        return _stitch_logical_document(
+            logical_doc_id=logical_doc_id,
+            hits=hits,
+            content_field=self.content_field,
+            vector_field=self.vector_field,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -643,13 +1078,15 @@ class AsyncElasticsearchRetriever:
     """
 
     host: str
-    api_key: str
+    api_key: str = field(repr=False)
     index: str
     content_field: str = "content"
     vector_field: str = "embedding"
+    embedding_provider: str = "openai"
     embedding_model: str | None = None
-    embedding_api_key: str | None = None
+    embedding_api_key: str | None = field(default=None, repr=False)
     embedding_base_url: str = "https://api.openai.com/v1"
+    embedding_ssl_verify: bool = True
     preview_length: int = 500
 
     # Cache configuration
@@ -664,8 +1101,17 @@ class AsyncElasticsearchRetriever:
     _http_client: Any = field(default=None, init=False, repr=False)
     _embedding_cache: _LRUCache | None = field(default=None, init=False, repr=False)
     _result_cache: _TTLCache | None = field(default=None, init=False, repr=False)
+    _supports_rrf: bool | None = field(default=None, init=False, repr=False)
+    _supports_id_secondary_sort: bool | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        if self.cache_embeddings and self.embedding_cache_size <= 0:
+            raise ValueError("embedding_cache_size must be > 0 when cache_embeddings is enabled")
+        if self.cache_results:
+            if self.result_cache_size <= 0:
+                raise ValueError("result_cache_size must be > 0 when cache_results is enabled")
+            if self.result_cache_ttl <= 0:
+                raise ValueError("result_cache_ttl must be > 0 when cache_results is enabled")
         if self.cache_embeddings:
             self._embedding_cache = _LRUCache(self.embedding_cache_size)
         if self.cache_results:
@@ -717,18 +1163,47 @@ class AsyncElasticsearchRetriever:
             return text
         return text[: self.preview_length] + "…"
 
+    def _hit_to_document(self, hit: dict[str, Any]) -> dict[str, Any]:
+        source = hit.get("_source", {})
+        content = source.get(self.content_field, "")
+        metadata = {
+            k: v for k, v in source.items() if k != self.content_field and k != self.vector_field
+        }
+        result = {
+            "doc_id": hit["_id"],
+            "page_doc_id": hit["_id"],
+            "content": content,
+            "metadata": metadata,
+        }
+        logical_doc_id = metadata.get("doc_id")
+        if logical_doc_id is not None:
+            result["logical_doc_id"] = logical_doc_id
+        page_num = metadata.get("page_num")
+        if page_num is not None:
+            result["page_num"] = page_num
+        return result
+
     def _hit_to_result(self, hit: dict[str, Any]) -> dict[str, Any]:
         source = hit.get("_source", {})
         content = source.get(self.content_field, "")
         metadata = {
             k: v for k, v in source.items() if k != self.content_field and k != self.vector_field
         }
-        return {
-            "doc_id": hit["_id"],
+        page_doc_id = hit["_id"]
+        result = {
+            "doc_id": page_doc_id,
+            "page_doc_id": page_doc_id,
             "preview": self._preview(content),
             "score": hit.get("_score", 0.0),
             "metadata": metadata,
         }
+        logical_doc_id = metadata.get("doc_id")
+        if logical_doc_id is not None:
+            result["logical_doc_id"] = logical_doc_id
+        page_num = metadata.get("page_num")
+        if page_num is not None:
+            result["page_num"] = page_num
+        return result
 
     async def _embed(self, text: str) -> list[float]:
         """Embed *text* via an OpenAI-compatible ``/embeddings`` endpoint (async)."""
@@ -739,27 +1214,41 @@ class AsyncElasticsearchRetriever:
 
         # Check embedding cache
         if self._embedding_cache is not None:
-            key = _cache_key(text, self.embedding_model)
+            key = _cache_key(
+                text,
+                self.embedding_provider,
+                self.embedding_model,
+                self.embedding_base_url,
+                self.embedding_ssl_verify,
+            )
             cached = self._embedding_cache.get(key)
             if cached is not None:
                 return cached
 
-        import os
+        if self.embedding_provider == "vertexai":
+            vector = await asyncio.to_thread(
+                _embed_vertexai_query,
+                text,
+                model=self.embedding_model,
+                ssl_verify=self.embedding_ssl_verify,
+            )
+        else:
+            import os
 
-        api_key = self.embedding_api_key or os.environ.get("OPENAI_API_KEY", "")
-        url = f"{self.embedding_base_url.rstrip('/')}/embeddings"
-        http = self._get_http_client()
-        resp = await http.post(
-            url,
-            json={"input": text, "model": self.embedding_model},
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
-        )
-        resp.raise_for_status()
-        body = resp.json()
-        vector = body["data"][0]["embedding"]
+            api_key = self.embedding_api_key or os.environ.get("OPENAI_API_KEY", "")
+            url = f"{self.embedding_base_url.rstrip('/')}/embeddings"
+            http = self._get_http_client()
+            resp = await http.post(
+                url,
+                json={"input": text, "model": self.embedding_model},
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                },
+            )
+            resp.raise_for_status()
+            body = resp.json()
+            vector = body["data"][0]["embedding"]
 
         # Store in embedding cache
         if self._embedding_cache is not None:
@@ -794,6 +1283,17 @@ class AsyncElasticsearchRetriever:
         if self._result_cache is not None:
             self._result_cache.clear()
 
+    async def _hybrid_search_local(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        filters: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        keyword_results = await self.search(query, top_k=top_k, filters=filters)
+        vector_results = await self.vector_search(query, top_k=top_k, filters=filters)
+        return _reciprocal_rank_fuse([keyword_results, vector_results], top_k=top_k)
+
     # ------------------------------------------------------------------
     # AsyncRetrieverProtocol methods
     # ------------------------------------------------------------------
@@ -811,6 +1311,7 @@ class AsyncElasticsearchRetriever:
 
         es = self._get_client()
         filter_clauses, must_not_clauses = _build_filter_clauses(filters)
+        source_excludes = {"excludes": [self.vector_field]}
         body: dict[str, Any] = {
             "query": {
                 "bool": {
@@ -818,7 +1319,7 @@ class AsyncElasticsearchRetriever:
                 }
             },
             "size": top_k,
-            "_source": True,
+            "_source": source_excludes,
         }
         _apply_bool_filter(body, "query", filter_clauses, must_not_clauses)
         resp = await es.search(index=self.index, body=body)
@@ -840,6 +1341,7 @@ class AsyncElasticsearchRetriever:
         es = self._get_client()
         query_vector = await self._embed(query)
         filter_clauses, must_not_clauses = _build_filter_clauses(filters)
+        source_excludes = {"excludes": [self.vector_field]}
         body: dict[str, Any] = {
             "knn": {
                 "field": self.vector_field,
@@ -847,7 +1349,7 @@ class AsyncElasticsearchRetriever:
                 "k": top_k,
                 "num_candidates": max(top_k * 2, 50),
             },
-            "_source": True,
+            "_source": source_excludes,
         }
         _apply_bool_filter(body, "knn", filter_clauses, must_not_clauses)
         resp = await es.search(index=self.index, body=body)
@@ -866,9 +1368,15 @@ class AsyncElasticsearchRetriever:
         if cached is not None:
             return cached
 
+        if self._supports_rrf is False:
+            results = await self._hybrid_search_local(query, top_k=top_k, filters=filters)
+            self._store_results("hybrid_search", query, top_k, filters, results)
+            return results
+
         es = self._get_client()
         query_vector = await self._embed(query)
         filter_clauses, must_not_clauses = _build_filter_clauses(filters)
+        source_excludes = {"excludes": [self.vector_field]}
         body: dict[str, Any] = {
             "query": {
                 "bool": {
@@ -883,11 +1391,24 @@ class AsyncElasticsearchRetriever:
             },
             "rank": {"rrf": {}},
             "size": top_k,
-            "_source": True,
+            "_source": source_excludes,
         }
         _apply_bool_filter(body, "query", filter_clauses, must_not_clauses)
         _apply_bool_filter(body, "knn", filter_clauses, must_not_clauses)
-        resp = await es.search(index=self.index, body=body)
+        try:
+            resp = await es.search(index=self.index, body=body)
+        except Exception as exc:
+            if not _is_rrf_license_error(exc):
+                raise
+            self._supports_rrf = False
+            logger.warning(
+                "Elasticsearch rank.rrf is unavailable for index '%s'; falling back to local RRF fusion",
+                self.index,
+            )
+            results = await self._hybrid_search_local(query, top_k=top_k, filters=filters)
+            self._store_results("hybrid_search", query, top_k, filters, results)
+            return results
+        self._supports_rrf = True
         results = [self._hit_to_result(hit) for hit in resp["hits"]["hits"]]
         self._store_results("hybrid_search", query, top_k, filters, results)
         return results
@@ -895,13 +1416,109 @@ class AsyncElasticsearchRetriever:
     async def get(self, doc_id: str) -> dict[str, Any]:
         es = self._get_client()
         resp = await es.get(index=self.index, id=doc_id)
-        source = resp.get("_source", {})
-        content = source.get(self.content_field, "")
-        metadata = {
-            k: v for k, v in source.items() if k != self.content_field and k != self.vector_field
-        }
-        return {
-            "doc_id": resp["_id"],
-            "content": content,
-            "metadata": metadata,
-        }
+        return self._hit_to_document(resp)
+
+    async def get_pages(
+        self,
+        logical_doc_id: str,
+        *,
+        pages: list[int] | None = None,
+        radius: int = 0,
+        max_pages: int = 20,
+    ) -> list[dict[str, Any]]:
+        es = self._get_client()
+        include_id_sort = self._supports_id_secondary_sort is not False
+        page_numbers = _expanded_page_numbers(pages, radius=radius, max_pages=max_pages)
+        body = _logical_doc_search_body(
+            logical_doc_id,
+            max_pages=max_pages,
+            include_id_sort=include_id_sort,
+            page_numbers=page_numbers,
+        )
+        try:
+            resp = await es.search(index=self.index, body=body)
+            if include_id_sort:
+                self._supports_id_secondary_sort = True
+        except Exception as exc:
+            if not include_id_sort or not _is_id_sort_fielddata_error(exc):
+                raise
+            self._supports_id_secondary_sort = False
+            logger.debug(
+                "Elasticsearch _id secondary sort is unavailable for index '%s'; "
+                "falling back to page_num-only sort for page retrieval",
+                self.index,
+            )
+            body = _logical_doc_search_body(
+                logical_doc_id,
+                max_pages=max_pages,
+                include_id_sort=False,
+                page_numbers=page_numbers,
+            )
+            resp = await es.search(index=self.index, body=body)
+        hits = resp.get("hits", {}).get("hits", [])
+        return [self._hit_to_document(hit) for hit in hits]
+
+    async def get_pages_text(
+        self,
+        logical_doc_id: str,
+        *,
+        pages: list[int] | None = None,
+        radius: int = 0,
+        max_pages: int = 20,
+    ) -> str:
+        docs = await self.get_pages(
+            logical_doc_id,
+            pages=pages,
+            radius=radius,
+            max_pages=max_pages,
+        )
+        parts: list[str] = []
+        for doc in docs:
+            page_num = doc.get("page_num")
+            content = doc.get("content", "")
+            if isinstance(page_num, int):
+                parts.append(f"<!-- Page {page_num} -->\n{content}")
+            else:
+                parts.append(str(content))
+        return "\n\n".join(parts)
+
+    async def get_logical_document(
+        self, logical_doc_id: str, *, max_pages: int = 2000
+    ) -> dict[str, Any]:
+        es = self._get_client()
+        include_id_sort = self._supports_id_secondary_sort is not False
+        body = _logical_doc_search_body(
+            logical_doc_id,
+            max_pages=max_pages,
+            include_id_sort=include_id_sort,
+            page_numbers=None,
+        )
+        try:
+            resp = await es.search(index=self.index, body=body)
+            if include_id_sort:
+                self._supports_id_secondary_sort = True
+        except Exception as exc:
+            if not include_id_sort or not _is_id_sort_fielddata_error(exc):
+                raise
+            self._supports_id_secondary_sort = False
+            logger.debug(
+                "Elasticsearch _id secondary sort is unavailable for index '%s'; "
+                "falling back to page_num-only sort for logical document reconstruction",
+                self.index,
+            )
+            body = _logical_doc_search_body(
+                logical_doc_id,
+                max_pages=max_pages,
+                include_id_sort=False,
+                page_numbers=None,
+            )
+            resp = await es.search(index=self.index, body=body)
+        hits = resp.get("hits", {}).get("hits", [])
+        if not hits:
+            raise KeyError(f"logical document not found: {logical_doc_id}")
+        return _stitch_logical_document(
+            logical_doc_id=logical_doc_id,
+            hits=hits,
+            content_field=self.content_field,
+            vector_field=self.vector_field,
+        )

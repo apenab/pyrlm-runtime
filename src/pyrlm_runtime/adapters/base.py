@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from ..policy import estimate_tokens
 
@@ -32,6 +32,7 @@ class ModelResponse:
     text: str
     usage: Usage
     model_id: str | None = None
+    meta: dict[str, Any] | None = None
 
 
 class ModelAdapter(Protocol):

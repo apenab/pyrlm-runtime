@@ -17,6 +17,92 @@ PayloadBuilder = Callable[[list[dict[str, str]], int, float, str | None], dict[s
 ResponseParser = Callable[[dict[str, Any]], tuple[str, Usage | None]]
 
 
+def _content_kind(content: Any) -> str:
+    if content is None:
+        return "null"
+    if isinstance(content, str):
+        return "string"
+    if isinstance(content, list):
+        return "list"
+    return type(content).__name__
+
+
+def _content_blocks_summary(content: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(content, list):
+        return None
+    blocks: list[dict[str, Any]] = []
+    for block in content[:10]:
+        if isinstance(block, Mapping):
+            summary: dict[str, Any] = {
+                "type": str(block.get("type", "object")),
+            }
+            text = block.get("text")
+            if isinstance(text, str):
+                summary["text_len"] = len(text)
+            content_text = block.get("content")
+            if isinstance(content_text, str):
+                summary["content_len"] = len(content_text)
+            blocks.append(summary)
+        else:
+            blocks.append({"type": type(block).__name__})
+    if len(content) > 10:
+        blocks.append({"type": "...", "omitted": len(content) - 10})
+    return blocks
+
+
+def _content_to_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, Mapping):
+                text = block.get("text")
+                if isinstance(text, str) and text:
+                    parts.append(text)
+                    continue
+                content_text = block.get("content")
+                if isinstance(content_text, str) and content_text:
+                    parts.append(content_text)
+        return "\n".join(parts)
+    return str(content)
+
+
+def _extract_response_meta(data: dict[str, Any]) -> dict[str, Any]:
+    choice = {}
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices:
+        first_choice = choices[0]
+        if isinstance(first_choice, Mapping):
+            choice = dict(first_choice)
+    message = choice.get("message")
+    if not isinstance(message, Mapping):
+        message = {}
+    content = message.get("content")
+    content_kind = _content_kind(content)
+    content_blocks = _content_blocks_summary(content)
+    reasoning_present = any(
+        key in message for key in ("reasoning", "reasoning_content", "reasoning_summary")
+    )
+    if isinstance(content, list):
+        reasoning_present = reasoning_present or any(
+            isinstance(block, Mapping)
+            and "reasoning" in str(block.get("type", "")).lower()
+            for block in content
+        )
+    meta: dict[str, Any] = {
+        "provider": "openai_compatible",
+        "finish_reason": choice.get("finish_reason"),
+        "content_kind": content_kind,
+        "reasoning_present": reasoning_present,
+    }
+    if content_blocks is not None:
+        meta["content_blocks"] = content_blocks
+    return meta
+
+
 def default_payload_builder(
     messages: list[dict[str, str]],
     max_tokens: int,
@@ -35,7 +121,7 @@ def default_payload_builder(
 
 def default_response_parser(data: dict[str, Any]) -> tuple[str, Usage | None]:
     message = data["choices"][0]["message"]
-    content = message.get("content") or ""
+    content = _content_to_text(message.get("content"))
     usage_data = data.get("usage")
     usage = Usage.from_dict(usage_data) if usage_data else None
     return content, usage
@@ -134,6 +220,13 @@ class GenericChatAdapter(ModelAdapter):
             self.endpoint,
             elapsed,
         )
+        if not response.is_success:
+            try:
+                err_body = response.json()
+                err_msg = err_body.get("error", {}).get("message") or response.text
+            except Exception:
+                err_msg = response.text
+            logger.debug("HTTP %d body: %s", response.status_code, err_msg[:500])
         response.raise_for_status()
 
         try:
@@ -146,10 +239,15 @@ class GenericChatAdapter(ModelAdapter):
         except (KeyError, IndexError, TypeError) as e:
             raise ValueError(f"Unexpected response structure from {self.endpoint}: {e}") from e
 
+        meta = _extract_response_meta(data)
+        finish_reason = meta.get("finish_reason")
+        if isinstance(content, str) and not content.strip() and finish_reason:
+            logger.warning("Empty content with finish_reason=%s", finish_reason)
+
         if usage is None:
             prompt = "\n".join(msg.get("content", "") for msg in messages)
             usage = estimate_usage(prompt, content)
-        return ModelResponse(text=content, usage=usage, model_id=self.model)
+        return ModelResponse(text=content, usage=usage, model_id=self.model, meta=meta)
 
     def _handle_retryable_error(self, error: Exception, attempt: int) -> None:
         """Log and wait before retrying; no-op when retries are exhausted.

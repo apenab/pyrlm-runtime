@@ -4,7 +4,7 @@ import ast
 from dataclasses import dataclass
 from typing import Any, Callable, Dict
 
-from .env import ExecResult
+from .env import ExecResult, _snapshot_user_state
 
 # Primitive types that Monty can handle directly as inputs.
 _MONTY_PRIMITIVES = (str, int, float, bool, type(None))
@@ -174,6 +174,28 @@ class MontyREPL:
 
     def get(self, name: str) -> Any:
         return self._variables.get(name)
+
+    def show_vars(self) -> str:
+        snapshot = self.snapshot_state()
+        if not snapshot:
+            return "No variables created yet. Write code to create variables first."
+        return "Available variables: " + ", ".join(
+            f"{name} ({summary.split('(', 1)[0]})" for name, summary in snapshot.items()
+        )
+
+    def snapshot_state(self) -> Dict[str, str]:
+        scaffold: set[str] = getattr(self, "_scaffold_names", set())
+        return _snapshot_user_state(self._variables, scaffold)
+
+    def describe_state(self, max_items: int = 20) -> str:
+        snapshot = self.snapshot_state()
+        if not snapshot:
+            return "No user variables available."
+        items = list(snapshot.items())
+        lines = [f"{name} = {summary}" for name, summary in items[:max_items]]
+        if len(items) > max_items:
+            lines.append(f"... and {len(items) - max_items} more variable(s)")
+        return "REPL state:\n" + "\n".join(lines)
 
     def _register_object(self, name: str, obj: Any) -> None:
         """Decompose a complex object into external functions for Monty.

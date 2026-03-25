@@ -1,110 +1,160 @@
 """
-Azure GPT-5.1 Live Rich trace demo for pyrlm-runtime.
+Demo interactivo de RLM (Recursive Language Model) con trazas Rich.
 
-This example is meant to be visually clear in a terminal recording or screenshot:
-it loads Azure credentials from `.env`, runs a short RLM task, and prints the
-full REPL trajectory live with Rich panels.
+=== ¿Qué es RLM? ===
 
-Required env vars:
+Un LLM normal recibe un prompt y devuelve texto directamente.
+Un RLM es diferente: el modelo genera CÓDIGO PYTHON que se ejecuta
+en un REPL, y puede llamar a sub-LLMs para analizar partes del texto.
+Es como darle al modelo una calculadora y acceso a asistentes.
+
+=== ¿Qué muestra este ejemplo? ===
+
+  1. Se le da al RLM un reporte de ventas como contexto
+  2. Se le hace una pregunta sobre ese reporte
+  3. El RLM genera código Python para inspeccionar los datos
+  4. El REPL ejecuta ese código y devuelve resultados
+  5. El RLM sintetiza la respuesta final
+
+=== Variables de entorno necesarias ===
+
     AZURE_OPENAI_API_KEY
-    OPENAI_ENDPOINT or AZURE_ACCOUNT_NAME
+    OPENAI_ENDPOINT  (o AZURE_ACCOUNT_NAME)
 
-Optional env vars:
-    AZURE_OPENAI_API_VERSION (default: 2024-10-21)
+=== Cómo ejecutar ===
 
-Run with:
     uv run python examples/rich_repl_demo.py
-    uv run python examples/rich_repl_demo.py --model gpt-5.1
-    uv run python examples/rich_repl_demo.py --query "Which product sold the most units?"
+    uv run python examples/rich_repl_demo.py --modelo gpt-5.1
+    uv run python examples/rich_repl_demo.py --pregunta "¿Cuál región vendió más?"
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
 
-import sys
-from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from _azure_check import check_azure_connection
 from pyrlm_runtime import Context, RLM
 from pyrlm_runtime.adapters import AzureOpenAIAdapter
 from pyrlm_runtime.rich_trace import RichTraceListener
 
-DEFAULT_QUERY = "Which product sold the most units, and how many units was that?"
+# ---------------------------------------------------------------------------
+# Datos de ejemplo: un reporte de ventas trimestral en español.
+# Este texto es el "contexto" que el RLM va a explorar con código Python.
+# ---------------------------------------------------------------------------
+REPORTE_VENTAS = """
+Reporte de ventas - Q1 2025
 
-DEMO_TEXT = """
-Sales report:
+Región Norte:
+  - Laptops: 150 unidades, $225,000
+  - Monitores: 80 unidades, $64,000
+  - Teclados: 200 unidades, $10,000
 
-- notebook: units=12
-- mug: units=7
-- sticker: units=20
+Región Sur:
+  - Laptops: 90 unidades, $135,000
+  - Monitores: 120 unidades, $96,000
+  - Teclados: 310 unidades, $15,500
 
-Answer using only this report.
+Región Centro:
+  - Laptops: 200 unidades, $300,000
+  - Monitores: 95 unidades, $76,000
+  - Teclados: 180 unidades, $9,000
 """.strip()
 
+PREGUNTA_DEFAULT = "¿Qué región tuvo el mayor ingreso total y cuánto fue?"
 
-def _load_demo_env() -> None:
-    loaded = False
 
-    discovered = find_dotenv(usecwd=True)
-    if discovered:
-        load_dotenv(discovered, override=False)
-        loaded = True
+# ---------------------------------------------------------------------------
+# Carga de credenciales Azure (busca .env en varias ubicaciones)
+# ---------------------------------------------------------------------------
+def _cargar_env() -> None:
+    descubierto = find_dotenv(usecwd=True)
+    if descubierto:
+        load_dotenv(descubierto, override=False)
 
     if os.getenv("AZURE_OPENAI_API_KEY"):
         return
 
-    here = Path(__file__).resolve()
-    candidates = [
-        here.parents[1] / ".env",
-        here.parents[2] / ".env",
-        here.parents[2] / "ocr-documents" / ".env",
+    aqui = Path(__file__).resolve()
+    candidatos = [
+        aqui.parents[1] / ".env",
+        aqui.parents[2] / ".env",
     ]
-    for candidate in candidates:
-        if candidate.is_file():
-            load_dotenv(candidate, override=False)
-            loaded = True
+    for candidato in candidatos:
+        if candidato.is_file():
+            load_dotenv(candidato, override=False)
             if os.getenv("AZURE_OPENAI_API_KEY"):
                 return
 
-    if not loaded:
-        load_dotenv(override=False)
+    load_dotenv(override=False)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Azure GPT-5.1 Live Rich trace demo")
-    parser.add_argument(
-        "--model",
-        default="gpt-5.1",
-        help="Azure deployment name to use for the demo",
+def parsear_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Demo de RLM con trazas Rich en terminal"
     )
     parser.add_argument(
-        "--query",
-        default=DEFAULT_QUERY,
-        help="Question to ask over the demo context",
+        "--modelo",
+        default="gpt-5.1",
+        help="Nombre del deployment en Azure (default: gpt-5.1)",
+    )
+    parser.add_argument(
+        "--pregunta",
+        default=PREGUNTA_DEFAULT,
+        help="Pregunta a hacer sobre el reporte de ventas",
     )
     return parser.parse_args()
 
 
 def main() -> None:
-    args = parse_args()
-    _load_demo_env()
-    check_azure_connection(args.model)
+    args = parsear_args()
 
-    adapter = AzureOpenAIAdapter(model=args.model)
+    # --- Paso 1: Cargar credenciales y verificar conexión ---
+    _cargar_env()
+    check_azure_connection(args.modelo)
+
+    # --- Paso 2: Crear los componentes del RLM ---
+    #
+    #   adapter  = conexión al LLM (Azure OpenAI en este caso)
+    #   listener = imprime cada paso del RLM con paneles Rich
+    #   runtime  = el motor RLM que orquesta todo
+    #
+    adapter = AzureOpenAIAdapter(model=args.modelo)
     listener = RichTraceListener()
     runtime = RLM(adapter=adapter, event_listener=listener)
 
-    output, trace = runtime.run(args.query, Context.from_text(DEMO_TEXT))
-    total_tokens = sum(step.usage.total_tokens for step in trace.steps if step.usage is not None)
+    # --- Paso 3: Ejecutar el RLM ---
+    #
+    #   El RLM recibe:
+    #     - Una pregunta (query)
+    #     - Un contexto (los datos que el modelo puede explorar con código)
+    #
+    #   Internamente el RLM hace un loop:
+    #     1. El LLM genera código Python
+    #     2. El REPL lo ejecuta (puede usar peek(), ctx.find(), llm_query()...)
+    #     3. El LLM ve el resultado y decide: ¿genero más código o ya tengo la respuesta?
+    #     4. Cuando está listo, emite FINAL_VAR con la variable que contiene la respuesta
+    #
+    contexto = Context.from_text(REPORTE_VENTAS)
+    respuesta, traza = runtime.run(args.pregunta, contexto)
 
-    print("\nFinal answer:")
-    print(output)
-    print(f"\nTrace summary: {len(trace.steps)} steps, {total_tokens} tokens")
+    # --- Paso 4: Mostrar resultados ---
+    tokens_total = sum(
+        paso.usage.total_tokens
+        for paso in traza.steps
+        if paso.usage is not None
+    )
+
+    print("\n" + "=" * 50)
+    print("RESPUESTA FINAL:")
+    print(respuesta)
+    print(f"\nResumen: {len(traza.steps)} pasos, {tokens_total} tokens")
+    print("=" * 50)
 
 
 if __name__ == "__main__":

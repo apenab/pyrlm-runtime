@@ -558,6 +558,12 @@ For large corpora that don't fit in memory, the RLM can search external document
 
 ### Quick Setup
 
+First, install the optional Elasticsearch extra:
+
+```bash
+pip install "pyrlm-runtime[elasticsearch]"
+```
+
 ```python
 from pyrlm_runtime import RLM
 from pyrlm_runtime.adapters import OpenAICompatAdapter

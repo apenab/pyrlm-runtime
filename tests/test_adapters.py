@@ -64,10 +64,19 @@ class TestModelResponse:
     def test_default_model_id_is_none(self) -> None:
         resp = ModelResponse(text="hi", usage=Usage(1, 1, 2))
         assert resp.model_id is None
+        assert resp.meta is None
 
     def test_model_id_preserved(self) -> None:
         resp = ModelResponse(text="hi", usage=Usage(1, 1, 2), model_id="gpt-4")
         assert resp.model_id == "gpt-4"
+
+    def test_meta_preserved(self) -> None:
+        resp = ModelResponse(
+            text="hi",
+            usage=Usage(1, 1, 2),
+            meta={"finish_reason": "stop"},
+        )
+        assert resp.meta == {"finish_reason": "stop"}
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +185,28 @@ class TestGenericChatAdapterComplete:
         adapter._client = httpx.Client(transport=httpx.MockTransport(lambda _: resp))
         result = adapter.complete(MESSAGES)
         assert result.usage.total_tokens > 0
+        adapter.close()
+
+    def test_preserves_finish_reason_meta_for_empty_length_response(self) -> None:
+        body = {
+            "choices": [{
+                "message": {"content": None, "reasoning_content": "internal"},
+                "finish_reason": "length",
+            }],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+        }
+        resp = httpx.Response(200, json=body)
+        adapter = GenericChatAdapter(endpoint="http://x", max_retries=0)
+        adapter._client = httpx.Client(transport=httpx.MockTransport(lambda _: resp))
+
+        result = adapter.complete(MESSAGES)
+
+        assert result.text == ""
+        assert result.meta is not None
+        assert result.meta["provider"] == "openai_compatible"
+        assert result.meta["finish_reason"] == "length"
+        assert result.meta["content_kind"] == "null"
+        assert result.meta["reasoning_present"] is True
         adapter.close()
 
     def test_retries_on_429(self) -> None:

@@ -29,6 +29,68 @@ class REPLProtocol(Protocol):
     def exec(self, code: str) -> ExecResult: ...
     def get(self, name: str) -> Any: ...
     def set(self, name: str, value: Any) -> None: ...
+    def snapshot_state(self) -> Dict[str, str]: ...
+    def describe_state(self, max_items: int = 20) -> str: ...
+
+
+def _truncate_repr(value: Any, max_chars: int = 80) -> str:
+    text = repr(value)
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 14] + "...<truncated>"
+
+
+def _summarize_value(value: Any) -> str:
+    if isinstance(value, Context):
+        meta = value.metadata()
+        return f"Context[len={meta['total_length']}, docs={meta['num_documents']}]"
+    if isinstance(value, str):
+        preview = _truncate_repr(value, max_chars=60)
+        return f"str[len={len(value)}] {preview}"
+    if isinstance(value, list):
+        return f"list[len={len(value)}]"
+    if isinstance(value, tuple):
+        return f"tuple[len={len(value)}]"
+    if isinstance(value, set):
+        return f"set[len={len(value)}]"
+    if isinstance(value, dict):
+        keys = list(value.keys())
+        preview = _truncate_repr(keys[:3], max_chars=50)
+        suffix = "" if len(keys) <= 3 else ", ..."
+        return f"dict[len={len(value)}] keys={preview}{suffix}"
+    if isinstance(value, (int, float, bool)):
+        return f"{type(value).__name__}({_truncate_repr(value, max_chars=32)})"
+    return f"{type(value).__name__}({_truncate_repr(value, max_chars=60)})"
+
+
+def _snapshot_user_state(values: Dict[str, Any], scaffold: set[str] | None = None) -> Dict[str, str]:
+    skip = {"__builtins__", "__name__"} | (scaffold or set())
+    snapshot: Dict[str, str] = {}
+    for name, value in values.items():
+        if name.startswith("_") or name in skip:
+            continue
+        snapshot[name] = _summarize_value(value)
+    return dict(sorted(snapshot.items()))
+
+
+def _format_syntax_error(exc: SyntaxError, code: str) -> str:
+    line_text = ""
+    if exc.text:
+        line_text = exc.text.rstrip("\n")
+    elif exc.lineno and 1 <= exc.lineno <= len(code.splitlines()):
+        line_text = code.splitlines()[exc.lineno - 1]
+
+    detail = exc.msg or "invalid syntax"
+    if exc.lineno:
+        detail += f" at line {exc.lineno}"
+    if exc.offset and line_text:
+        pointer = " " * max(exc.offset - 1, 0) + "^"
+        detail += f":\n{line_text}\n{pointer}"
+    elif line_text:
+        detail += f":\n{line_text}"
+    if len(code.splitlines()) > 80:
+        detail += "\nHint: split the task into smaller Python blocks."
+    return f"SyntaxError: {detail}"
 
 
 class PythonREPL:
@@ -132,13 +194,16 @@ class PythonREPL:
             try:
                 compiled = compile(code, "<repl>", "eval")
             except SyntaxError:
+                compiled_exec = compile(code, "<repl>", "exec")
                 with redirect_stdout(buffer):
-                    exec(code, self._globals, None)
+                    exec(compiled_exec, self._globals, None)
             else:
                 with redirect_stdout(buffer):
                     result = eval(compiled, self._globals, None)
                     if result is not None:
                         print(result)
+        except SyntaxError as exc:
+            error = _format_syntax_error(exc, code)
         except Exception as exc:  # noqa: BLE001
             error = f"{type(exc).__name__}: {exc}"
         stdout = self._truncate(buffer.getvalue())
@@ -170,6 +235,20 @@ class PythonREPL:
         return "Available variables: " + ", ".join(
             f"{k} ({t})" for k, t in sorted(user_vars.items())
         )
+
+    def snapshot_state(self) -> Dict[str, str]:
+        scaffold: set[str] = getattr(self, "_scaffold_names", set())
+        return _snapshot_user_state(self._globals, scaffold)
+
+    def describe_state(self, max_items: int = 20) -> str:
+        snapshot = self.snapshot_state()
+        if not snapshot:
+            return "No user variables available."
+        items = list(snapshot.items())
+        lines = [f"{name} = {summary}" for name, summary in items[:max_items]]
+        if len(items) > max_items:
+            lines.append(f"... and {len(items) - max_items} more variable(s)")
+        return "REPL state:\n" + "\n".join(lines)
 
     def restore_names(self, names: dict[str, Any]) -> None:
         """Restore scaffold names in globals after each exec.

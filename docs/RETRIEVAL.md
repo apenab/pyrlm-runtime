@@ -33,7 +33,7 @@ The retrieval layer solves this by letting the model **pull in documents on dema
 
 ## Architecture Decision: Retrieval as REPL Functions
 
-```
+```text
                     RLM with Extended REPL
                     +---------------------+
                     | Local functions:     |
@@ -135,7 +135,7 @@ retriever = ElasticsearchRetriever(
 
 The `elasticsearch` Python package is lazily imported. If not installed, a clear error message is raised:
 
-```
+```text
 ImportError: The 'elasticsearch' package is required for ElasticsearchRetriever.
 Install it with: pip install elasticsearch
 ```

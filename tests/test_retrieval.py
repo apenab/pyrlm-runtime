@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -50,6 +51,218 @@ class InMemoryRetriever:
     def get(self, doc_id):
         content = self.docs.get(doc_id, "")
         return {"doc_id": doc_id, "content": content, "metadata": {}}
+
+
+class SchemaAwareRetriever(InMemoryRetriever):
+    def search(self, query, *, top_k=10, filters=None):
+        del query, top_k, filters
+        return [
+            {
+                "doc_id": "page-001",
+                "preview": "first preview",
+                "score": 1.0,
+                "metadata": {"doc_id": "logical-doc-A"},
+            },
+            {
+                "doc_id": "page-002",
+                "preview": "second preview",
+                "score": 0.9,
+                "metadata": {"doc_id": "logical-doc-B"},
+            },
+        ]
+
+
+class LogicalDocFallbackRetriever(InMemoryRetriever):
+    def __init__(self) -> None:
+        super().__init__({
+            "page-001": "Page 1 text",
+            "page-002": "Page 2 text",
+        })
+
+    def search(self, query, *, top_k=10, filters=None):
+        del query, top_k, filters
+        return [
+            {
+                "doc_id": "page-001",
+                "preview": "Page 1 text",
+                "score": 1.0,
+                "metadata": {"doc_id": "logical-doc-A", "page_num": 1},
+            }
+        ]
+
+    def get(self, doc_id):
+        if doc_id in self.docs:
+            return {
+                "doc_id": doc_id,
+                "content": self.docs[doc_id],
+                "metadata": {"doc_id": "logical-doc-A"},
+            }
+        raise KeyError(doc_id)
+
+    def get_logical_document(self, logical_doc_id, *, max_pages=500):
+        del max_pages
+        if logical_doc_id != "logical-doc-A":
+            raise KeyError(logical_doc_id)
+        return {
+            "doc_id": logical_doc_id,
+            "logical_doc_id": logical_doc_id,
+            "content": "Page 1 text\n\nPage 2 text",
+            "metadata": {
+                "doc_id": logical_doc_id,
+                "page_count": 2,
+                "page_doc_ids": ["page-001", "page-002"],
+            },
+        }
+
+
+class DocSearchRetriever(InMemoryRetriever):
+    def hybrid_search(self, query, *, top_k=10, filters=None):
+        del query, top_k
+        results = [
+            {
+                "doc_id": "doc-A__p7",
+                "preview": "Doc A page 7",
+                "score": 3.0,
+                "metadata": {"doc_id": "doc-A", "page_num": 7},
+            },
+            {
+                "doc_id": "doc-A__p8",
+                "preview": "Doc A page 8",
+                "score": 2.8,
+                "metadata": {"doc_id": "doc-A", "page_num": 8},
+            },
+            {
+                "doc_id": "doc-B__p2",
+                "preview": "Doc B page 2",
+                "score": 2.2,
+                "metadata": {"doc_id": "doc-B", "page_num": 2},
+            },
+        ]
+        doc_filter = (filters or {}).get("doc_id")
+        if doc_filter:
+            results = [item for item in results if item["metadata"].get("doc_id") == doc_filter]
+        return results
+
+
+class ExactPageRetriever(InMemoryRetriever):
+    def __init__(self) -> None:
+        super().__init__()
+        self.pages = {
+            3: "Resumen sin la partida buscada.",
+            10: "| Importe neto de la cifra de\nnegocio | 982.160 | 786.063 |",
+        }
+
+    def get_logical_document(self, logical_doc_id, *, max_pages=500):
+        del max_pages
+        if logical_doc_id != "logical-doc-A":
+            raise KeyError(logical_doc_id)
+        return {
+            "doc_id": logical_doc_id,
+            "logical_doc_id": logical_doc_id,
+            "content": (
+                "<!-- Page 3 -->\nResumen sin la partida buscada.\n\n"
+                "<!-- Page 10 -->\n| Importe neto de la cifra de negocios | 982.160 | 786.063 |"
+            ),
+            "metadata": {
+                "doc_id": logical_doc_id,
+                "page_count": 2,
+                "page_doc_ids": ["logical-doc-A__p3", "logical-doc-A__p10"],
+            },
+        }
+
+    def get_pages_text(self, logical_doc_id, *, pages=None, radius=0, max_pages=20):
+        del radius, max_pages
+        if logical_doc_id != "logical-doc-A":
+            raise KeyError(logical_doc_id)
+        wanted = set(pages or [])
+        parts = []
+        for page_num in sorted(wanted):
+            if page_num in self.pages:
+                parts.append(f"<!-- Page {page_num} -->\n{self.pages[page_num]}")
+        return "\n\n".join(parts)
+
+
+class MultiCandidateComparativeRetriever(InMemoryRetriever):
+    def get_logical_document(self, logical_doc_id, *, max_pages=2000):
+        del max_pages
+        if logical_doc_id != "logical-doc-eizar":
+            raise KeyError(logical_doc_id)
+        return {
+            "doc_id": logical_doc_id,
+            "logical_doc_id": logical_doc_id,
+            "content": (
+                "<!-- Page 6 -->\n"
+                "| 1. Importe de la cifra de negocios | 179.964.152 175.200.881 | "
+                "180.073.791 174.718.771 5.355.020 |\n\n"
+                "<!-- Page 72 -->\n"
+                "| TOTAL | 179.964.152 | 180.073.791 |"
+            ),
+            "metadata": {
+                "doc_id": logical_doc_id,
+                "page_count": 85,
+                "expected_page_count": 85,
+                "indexed_page_count": 85,
+                "page_doc_ids": ["logical-doc-eizar__p6", "logical-doc-eizar__p72"],
+                "index_incomplete": False,
+            },
+        }
+
+    def get_pages_text(self, logical_doc_id, *, pages=None, radius=0, max_pages=20):
+        del radius, max_pages
+        if logical_doc_id != "logical-doc-eizar":
+            raise KeyError(logical_doc_id)
+        texts = {
+            6: "<!-- Page 6 -->\n| 1. Importe de la cifra de negocios | 179.964.152 175.200.881 | 180.073.791 174.718.771 5.355.020 |",
+            72: "<!-- Page 72 -->\n| TOTAL | 179.964.152 | 180.073.791 |",
+        }
+        parts = []
+        for page_num in pages or []:
+            if page_num in texts:
+                parts.append(texts[page_num])
+        return "\n\n".join(parts)
+
+    def hybrid_search(self, query, *, top_k=10, filters=None):
+        del query, top_k
+        if (filters or {}).get("doc_id") != "logical-doc-eizar":
+            return []
+        return [
+            {
+                "doc_id": "logical-doc-eizar__p72",
+                "preview": "TOTAL 179.964.152 | 180.073.791",
+                "score": 4.0,
+                "metadata": {"doc_id": "logical-doc-eizar", "page_num": 72},
+            },
+            {
+                "doc_id": "logical-doc-eizar__p6",
+                "preview": "tabla ruidosa",
+                "score": 3.0,
+                "metadata": {"doc_id": "logical-doc-eizar", "page_num": 6},
+            },
+        ]
+
+
+class IncompleteLogicalDocRetriever(InMemoryRetriever):
+    def get_logical_document(self, logical_doc_id, *, max_pages=2000):
+        del max_pages
+        if logical_doc_id != "logical-doc-incomplete":
+            raise KeyError(logical_doc_id)
+        return {
+            "doc_id": logical_doc_id,
+            "logical_doc_id": logical_doc_id,
+            "content": "<!-- Page 1 -->\nResumen sin la métrica.",
+            "metadata": {
+                "doc_id": logical_doc_id,
+                "page_count": 140,
+                "expected_page_count": 140,
+                "indexed_page_count": 10,
+                "page_doc_ids": [f"{logical_doc_id}__p{i}" for i in range(1, 11)],
+                "index_incomplete": True,
+            },
+        }
+
+    def hybrid_search(self, query, *, top_k=10, filters=None):
+        del query, top_k, filters
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +363,103 @@ class TestElasticsearchRetrieverSearch:
         results = retriever.search("A")
         assert len(results[0]["preview"]) == 11  # 10 chars + ellipsis
 
+    def test_get_logical_document_prefers_page_num_and_id_sort_when_supported(self) -> None:
+        retriever = _make_es_retriever()
+        mock_client = MagicMock()
+        mock_client.search.return_value = _mock_search_response(
+            {"_id": "doc__p2", "_score": 1.0, "_source": {"content": "Page 2", "page_num": 2, "doc_id": "doc", "page_count": 5}},
+            {"_id": "doc__p1", "_score": 1.0, "_source": {"content": "Page 1", "page_num": 1, "doc_id": "doc", "page_count": 5}},
+        )
+        retriever._client = mock_client
+
+        result = retriever.get_logical_document("doc")
+
+        call_body = mock_client.search.call_args[1]["body"]
+        assert call_body["sort"] == [
+            {"page_num": {"order": "asc", "missing": "_last"}},
+            {"_id": {"order": "asc"}},
+        ]
+        assert result["doc_id"] == "doc"
+        assert result["metadata"]["page_doc_ids"] == ["doc__p1", "doc__p2"]
+        assert result["metadata"]["chunk_count"] == 2
+        assert result["metadata"]["indexed_source_page_count"] == 2
+        assert result["metadata"]["indexed_page_count"] == 2
+        assert result["metadata"]["expected_page_count"] == 5
+        assert result["metadata"]["page_count"] == 5
+        assert result["metadata"]["index_incomplete"] is True
+        assert "Page 1" in result["content"]
+        assert "Page 2" in result["content"]
+
+    def test_get_logical_document_falls_back_when_id_sort_is_disallowed(self) -> None:
+        retriever = _make_es_retriever()
+        mock_client = MagicMock()
+        mock_client.search.side_effect = [
+            RuntimeError(
+                "BadRequestError(400, 'search_phase_execution_exception', "
+                "'Fielddata access on the _id field is disallowed')"
+            ),
+            _mock_search_response(
+                {"_id": "doc__p2", "_score": 1.0, "_source": {"content": "Page 2", "page_num": 2, "doc_id": "doc", "page_count": 2}},
+                {"_id": "doc__p1", "_score": 1.0, "_source": {"content": "Page 1", "page_num": 1, "doc_id": "doc", "page_count": 2}},
+            ),
+        ]
+        retriever._client = mock_client
+
+        result = retriever.get_logical_document("doc")
+
+        first_call_body = mock_client.search.call_args_list[0][1]["body"]
+        second_call_body = mock_client.search.call_args_list[1][1]["body"]
+        assert first_call_body["sort"] == [
+            {"page_num": {"order": "asc", "missing": "_last"}},
+            {"_id": {"order": "asc"}},
+        ]
+        assert second_call_body["sort"] == [{"page_num": {"order": "asc", "missing": "_last"}}]
+        assert retriever._supports_id_secondary_sort is False
+        assert result["metadata"]["page_doc_ids"] == ["doc__p1", "doc__p2"]
+        assert result["metadata"]["chunk_count"] == 2
+        assert result["metadata"]["indexed_source_page_count"] == 2
+        assert result["metadata"]["indexed_page_count"] == 2
+        assert result["metadata"]["expected_page_count"] == 2
+        assert result["metadata"]["index_incomplete"] is False
+
+    def test_get_logical_document_uses_source_page_coverage_for_indexed_page_count(self) -> None:
+        retriever = _make_es_retriever()
+        mock_client = MagicMock()
+        mock_client.search.return_value = _mock_search_response(
+            {
+                "_id": "doc__p1",
+                "_score": 1.0,
+                "_source": {
+                    "content": "Pages 1-2",
+                    "page_num": 1,
+                    "doc_id": "doc",
+                    "page_count": 5,
+                    "source_pages": [1, 2],
+                },
+            },
+            {
+                "_id": "doc__p3",
+                "_score": 1.0,
+                "_source": {
+                    "content": "Pages 3-5",
+                    "page_num": 3,
+                    "doc_id": "doc",
+                    "page_count": 5,
+                    "source_pages": [3, 4, 5],
+                },
+            },
+        )
+        retriever._client = mock_client
+
+        result = retriever.get_logical_document("doc")
+
+        assert result["metadata"]["chunk_count"] == 2
+        assert result["metadata"]["indexed_source_page_count"] == 5
+        assert result["metadata"]["indexed_page_count"] == 5
+        assert result["metadata"]["source_pages"] == [1, 2, 3, 4, 5]
+        assert result["metadata"]["expected_page_count"] == 5
+        assert result["metadata"]["index_incomplete"] is False
+
 
 class TestElasticsearchRetrieverVectorSearch:
     def test_vector_search_calls_embed(self) -> None:
@@ -171,6 +481,35 @@ class TestElasticsearchRetrieverVectorSearch:
         assert "knn" in call_body
         assert call_body["knn"]["query_vector"] == [0.1, 0.2, 0.3]
 
+    def test_vector_search_with_vertexai_provider(self) -> None:
+        retriever = ElasticsearchRetriever(
+            host="https://localhost:9200",
+            api_key="test-key",
+            index="test-index",
+            embedding_provider="vertexai",
+            embedding_model="text-embedding-005",
+        )
+        mock_client = MagicMock()
+        mock_client.search.return_value = _mock_search_response(
+            _make_hit("doc1", "semantic result", 0.95),
+        )
+        retriever._client = mock_client
+
+        with patch(
+            "pyrlm_runtime.retrieval._embed_vertexai_query",
+            return_value=[0.4, 0.5, 0.6],
+        ) as mock_embed:
+            results = retriever.vector_search("conceptual query")
+
+        mock_embed.assert_called_once_with(
+            "conceptual query",
+            model="text-embedding-005",
+            ssl_verify=True,
+        )
+        assert len(results) == 1
+        call_body = mock_client.search.call_args[1]["body"]
+        assert call_body["knn"]["query_vector"] == [0.4, 0.5, 0.6]
+
 
 class TestElasticsearchRetrieverHybridSearch:
     def test_hybrid_search_uses_rrf(self) -> None:
@@ -190,6 +529,36 @@ class TestElasticsearchRetrieverHybridSearch:
         assert "rrf" in call_body["rank"]
         assert "query" in call_body
         assert "knn" in call_body
+
+    def test_hybrid_search_falls_back_to_local_rrf_when_cluster_rejects_rrf(self) -> None:
+        retriever = _make_es_retriever()
+        mock_client = MagicMock()
+        mock_client.search.side_effect = [
+            RuntimeError(
+                "AuthorizationException(403, 'security_exception', "
+                "'current license is non-compliant for [Reciprocal Rank Fusion (RRF)]')"
+            ),
+            _mock_search_response(
+                _make_hit("doc-bm25", "lexical result", 8.0),
+                _make_hit("doc-shared", "shared result", 7.0),
+            ),
+            _mock_search_response(
+                _make_hit("doc-vector", "semantic result", 0.9),
+                _make_hit("doc-shared", "shared result", 0.8),
+            ),
+        ]
+        retriever._client = mock_client
+
+        with patch.object(retriever, "_embed", return_value=[0.1, 0.2]):
+            results = retriever.hybrid_search("test query")
+
+        assert [result["doc_id"] for result in results] == [
+            "doc-shared",
+            "doc-bm25",
+            "doc-vector",
+        ]
+        assert retriever._supports_rrf is False
+        assert mock_client.search.call_count == 3
 
 
 class TestElasticsearchRetrieverGet:
@@ -286,6 +655,38 @@ def test_es_get_in_repl() -> None:
     assert "Full document content" in output
 
 
+def test_es_get_text_in_repl() -> None:
+    """es_get_text() should retrieve raw document text as a string."""
+    retriever = InMemoryRetriever({"doc1": "Full document content"})
+    adapter = FakeAdapter(
+        script=[
+            'text = es_get_text("doc1")\nprint(text[:4])',
+            "FINAL_VAR: text",
+        ]
+    )
+
+    runtime = RLM(adapter=adapter, retriever=retriever)
+    output, trace = runtime.run("test", Context.from_text(""))
+
+    assert output == "Full document content"
+
+
+def test_es_get_text_accepts_logical_doc_id_in_repl() -> None:
+    retriever = LogicalDocFallbackRetriever()
+    adapter = FakeAdapter(
+        script=[
+            'text = es_get_text("logical-doc-A")\nprint(text.splitlines()[0])',
+            "FINAL_VAR: text",
+        ]
+    )
+
+    runtime = RLM(adapter=adapter, retriever=retriever)
+    output, trace = runtime.run("test", Context.from_text(""))
+
+    assert "Page 1 text" in output
+    assert "Page 2 text" in output
+
+
 def test_es_hybrid_search_in_repl() -> None:
     """es_hybrid_search() should be callable from the REPL."""
     retriever = InMemoryRetriever({
@@ -305,6 +706,242 @@ def test_es_hybrid_search_in_repl() -> None:
     assert output == "1"
 
 
+def test_es_hybrid_doc_search_in_repl() -> None:
+    retriever = DocSearchRetriever()
+    adapter = FakeAdapter(
+        script=[
+            (
+                'docs = es_hybrid_doc_search("fox", top_k=2)\n'
+                'summary = [(d["logical_doc_id"], d["hit_count"]) for d in docs]\n'
+                "print(summary)"
+            ),
+            "FINAL_VAR: docs",
+        ]
+    )
+
+    runtime = RLM(adapter=adapter, retriever=retriever)
+    output, trace = runtime.run("test", Context.from_text(""))
+
+    assert "doc-A" in output
+    assert "doc-B" in output
+
+
+def test_es_hybrid_search_in_doc_in_repl() -> None:
+    retriever = DocSearchRetriever()
+    adapter = FakeAdapter(
+        script=[
+            (
+                'pages = es_hybrid_search_in_doc("doc-A", "importe neto de la cifra de negocios", top_k=3)\n'
+                'print([(p["logical_doc_id"], p["page_num"]) for p in pages])'
+            ),
+            "FINAL_VAR: pages",
+        ]
+    )
+
+    runtime = RLM(adapter=adapter, retriever=retriever)
+    output, trace = runtime.run("test", Context.from_text(""))
+
+    assert "doc-A" in output
+    assert "doc-B" not in output
+
+
+def test_es_find_pages_text_in_repl() -> None:
+    retriever = ExactPageRetriever()
+    adapter = FakeAdapter(
+        script=[
+            (
+                'matches = es_find_pages("logical-doc-A", ["Importe neto de la cifra de negocios"])\n'
+                'text = es_find_pages_text("logical-doc-A", ["Importe neto de la cifra de negocios"])\n'
+                'print(matches)\n'
+                'print(text)'
+            ),
+            "FINAL_VAR: matches",
+        ]
+    )
+
+    runtime = RLM(adapter=adapter, retriever=retriever)
+    output, trace = runtime.run("test", Context.from_text(""))
+
+    assert "10" in output
+    assert "logical-doc-A__p10" in output
+
+
+def test_es_extract_comparative_metric_in_repl() -> None:
+    retriever = ExactPageRetriever()
+    adapter = FakeAdapter(
+        script=[
+            (
+                'row = es_extract_comparative_metric(\n'
+                '    "logical-doc-A",\n'
+                '    "Importe neto de la cifra de negocios",\n'
+                '    aliases=["Importe de la cifra de negocios"],\n'
+                ')\n'
+                'print(row)\n'
+                'answer = f"{row[\'recent_amount_raw\']}|{row[\'page_strategy\']}"'
+            ),
+            "FINAL_VAR: answer",
+        ]
+    )
+    adapter.add_rule(
+        r"You are a sub-LLM[\s\S]*Metrica objetivo: Importe neto de la cifra de negocios",
+        (
+            '{"entity_name":"Eurotransac","line_item_found":true,'
+            '"line_item_label":"Importe neto de la cifra de negocio",'
+            '"recent_year":2024,"recent_amount_raw":"982.160",'
+            '"previous_year":2023,"previous_amount_raw":"786.063",'
+            '"unit_hint":"Miles de euros","pages":[10],'
+            '"evidence":"fila","confidence":"high","reason":"ok"}'
+        ),
+        regex=True,
+    )
+
+    runtime = RLM(adapter=adapter, retriever=retriever)
+    output, trace = runtime.run("test", Context.from_text(""))
+
+    assert output == "982.160|exact"
+
+
+def test_comparative_metric_corpus_report_in_repl() -> None:
+    retriever = ExactPageRetriever()
+    adapter = FakeAdapter(
+        script=[
+            (
+                'report = comparative_metric_corpus_report(\n'
+                '    ["logical-doc-A"],\n'
+                '    "Importe neto de la cifra de negocios",\n'
+                '    aliases=["Importe de la cifra de negocios"],\n'
+                ')\n'
+                'print(report)\n'
+            ),
+            "FINAL_VAR: report",
+        ]
+    )
+    adapter.add_rule(
+        r"You are a sub-LLM[\s\S]*Metrica objetivo: Importe neto de la cifra de negocios",
+        (
+            '{"entity_name":"Eurotransac","line_item_found":true,'
+            '"line_item_label":"Importe neto de la cifra de negocio",'
+            '"recent_year":2024,"recent_amount_raw":"982.160",'
+            '"previous_year":2023,"previous_amount_raw":"786.063",'
+            '"unit_hint":"Miles de euros","pages":[10],'
+            '"evidence":"fila","confidence":"high","reason":"ok"}'
+        ),
+        regex=True,
+    )
+
+    runtime = RLM(adapter=adapter, retriever=retriever)
+    output, trace = runtime.run("test", Context.from_text(""))
+
+    assert "1. Eurotransac" in output
+    assert "Documento fuente: logical-doc-A" in output
+    assert "Variación porcentual:" in output
+
+
+def test_es_extract_comparative_metric_prefers_clean_single_page_candidate() -> None:
+    retriever = MultiCandidateComparativeRetriever()
+    adapter = FakeAdapter(
+        script=[
+            (
+                'row = es_extract_comparative_metric(\n'
+                '    "logical-doc-eizar",\n'
+                '    "Importe neto de la cifra de negocios",\n'
+                '    aliases=["Importe de la cifra de negocios"],\n'
+                ')\n'
+                'answer = f"{row[\'selected_pages\']}|{row[\'recent_amount_raw\']}|{parse_amount_text(row[\'recent_amount_raw\'])}"\n'
+                'print(answer)\n'
+            ),
+            "FINAL_VAR: answer",
+        ]
+    )
+    adapter.add_rule(
+        r"You are a sub-LLM[\s\S]*logical-doc-eizar pages=\[6\]",
+        (
+            '{"entity_name":"EIZAR","line_item_found":true,'
+            '"line_item_label":"Importe de la cifra de negocios",'
+            '"recent_year":2024,"recent_amount_raw":"179.964.152 175.200.881",'
+            '"previous_year":2023,"previous_amount_raw":"180.073.791 174.718.771 5.355.020",'
+            '"unit_hint":"euros","pages":[6],"evidence":"tabla ruidosa","confidence":"low","reason":"ocr"}'
+        ),
+        regex=True,
+    )
+    adapter.add_rule(
+        r"You are a sub-LLM[\s\S]*logical-doc-eizar pages=\[72\]",
+        (
+            '{"entity_name":"EIZAR","line_item_found":true,'
+            '"line_item_label":"Importe neto de la cifra de negocios",'
+            '"recent_year":2024,"recent_amount_raw":"179.964.152",'
+            '"previous_year":2023,"previous_amount_raw":"180.073.791",'
+            '"unit_hint":"euros","pages":[72],"evidence":"fila total","confidence":"high","reason":"ok"}'
+        ),
+        regex=True,
+    )
+    adapter.add_rule(
+        r"You are a sub-LLM[\s\S]*logical-doc-eizar pages=\[(?:6, 72|72, 6)\]",
+        (
+            '{"entity_name":"EIZAR","line_item_found":true,'
+            '"line_item_label":"Importe neto de la cifra de negocios",'
+            '"recent_year":2024,"recent_amount_raw":"179.964.152 175.200.881",'
+            '"previous_year":2023,"previous_amount_raw":"180.073.791 174.718.771 5.355.020",'
+            '"unit_hint":"euros","pages":[6,72],"evidence":"mezcla","confidence":"low","reason":"ocr"}'
+        ),
+        regex=True,
+    )
+
+    runtime = RLM(adapter=adapter, retriever=retriever)
+    output, trace = runtime.run("test", Context.from_text(""))
+
+    assert output == "[72]|179.964.152|179964152"
+
+
+def test_es_extract_comparative_metric_reports_incomplete_index() -> None:
+    retriever = IncompleteLogicalDocRetriever()
+    adapter = FakeAdapter(
+        script=[
+            (
+                'row = es_extract_comparative_metric(\n'
+                '    "logical-doc-incomplete",\n'
+                '    "Importe neto de la cifra de negocios",\n'
+                ')\n'
+                'answer = (\n'
+                '    f"{row[\'index_incomplete\']}|{row[\'indexed_page_count\']}|"\n'
+                '    f"{row[\'expected_page_count\']}|{row[\'page_strategy\']}|{row[\'reason\']}"\n'
+                ')\n'
+                'print(answer)'
+            ),
+            "FINAL_VAR: answer",
+        ]
+    )
+
+    runtime = RLM(adapter=adapter, retriever=retriever)
+    output, trace = runtime.run("test", Context.from_text(""))
+
+    assert output.startswith("True|10|140|no_pages|")
+    assert "incomplete" in output.lower()
+
+
+def test_search_result_schema_diagnostics_log_distinguishes_page_and_logical_doc_ids(
+    caplog,
+) -> None:
+    retriever = SchemaAwareRetriever()
+    adapter = FakeAdapter(
+        script=[
+            'results = es_search("fox")\nprint(len(results))',
+            "FINAL: done",
+        ]
+    )
+
+    runtime = RLM(adapter=adapter, retriever=retriever, rlm_diagnostics=True)
+    with caplog.at_level(logging.DEBUG, logger="pyrlm_runtime"):
+        output, trace = runtime.run("test", Context.from_text(""))
+
+    assert output == "done"
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "search_result_schema=" in log_text
+    assert '"page_doc_id": "page-001"' in log_text
+    assert '"logical_doc_id": "logical-doc-A"' in log_text
+    assert "first preview" not in log_text
+
+
 def test_context_optional_with_retriever() -> None:
     """When retriever is set, context can be omitted."""
     retriever = InMemoryRetriever({"doc1": "Test content"})
@@ -319,6 +956,21 @@ def test_context_optional_with_retriever() -> None:
     output, trace = runtime.run("test")  # No context argument
 
     assert output == "1"
+
+
+def test_empty_retrieval_context_bootstraps_prompt() -> None:
+    """An empty initial retrieval context should push the model toward search."""
+    retriever = InMemoryRetriever({"doc1": "Test content"})
+    adapter = FakeAdapter(script=["FINAL: done"])
+
+    runtime = RLM(adapter=adapter, retriever=retriever)
+    runtime.run("test")
+
+    initial_user_msg = next(m for m in adapter.call_log[0] if m["role"] == "user")["content"]
+    assert "Total length: 0 chars" in initial_user_msg
+    assert "Number of documents: 0" in initial_user_msg
+    assert "current context is empty because no documents have been retrieved yet" in initial_user_msg
+    assert "es_hybrid_search()" in initial_user_msg
 
 
 def test_context_required_without_retriever() -> None:
@@ -343,7 +995,22 @@ def test_system_prompt_includes_retrieval_docs() -> None:
     system_msg = next(m for m in last_call if m["role"] == "system")
     assert "es_search" in system_msg["content"]
     assert "es_hybrid_search" in system_msg["content"]
+    assert "es_hybrid_doc_search" in system_msg["content"]
+    assert "es_hybrid_search_in_doc" in system_msg["content"]
+    assert "es_find_pages" in system_msg["content"]
+    assert "es_find_pages_text" in system_msg["content"]
+    assert "es_extract_comparative_metric" in system_msg["content"]
     assert "es_get" in system_msg["content"]
+    assert "es_get_text" in system_msg["content"]
+    assert "page_doc_id" in system_msg["content"]
+    assert "logical_doc_id" in system_msg["content"]
+    assert "llm_query_json" in system_msg["content"]
+    assert "llm_batch_json" in system_msg["content"]
+    assert "llm_query_records" in system_msg["content"]
+    assert "llm_batch_records" in system_msg["content"]
+    assert "llm_extract_comparative_metric" in system_msg["content"]
+    assert "parse_amount_text" in system_msg["content"]
+    assert '"content"' in system_msg["content"]
 
 
 def test_system_prompt_excludes_retrieval_docs_without_retriever() -> None:
@@ -515,7 +1182,13 @@ class TestEmbeddingCache:
         # Manually populate embedding cache
         from pyrlm_runtime.retrieval import _cache_key
 
-        key = _cache_key("hello", "text-embedding-3-small")
+        key = _cache_key(
+            "hello",
+            "openai",
+            "text-embedding-3-small",
+            "https://api.openai.com/v1",
+            True,
+        )
         retriever._embedding_cache.set(key, [0.1, 0.2, 0.3])
 
         # _embed should return cached value without making HTTP call
@@ -541,7 +1214,6 @@ class TestEmbeddingCache:
         assert len(retriever._embedding_cache) == 0
 
         with patch("urllib.request.urlopen") as mock_urlopen:
-            import io
             import json
 
             response_data = json.dumps({"data": [{"embedding": [0.5, 0.6]}]}).encode()
@@ -836,6 +1508,47 @@ class TestAsyncElasticsearchRetriever:
 
         _run(_test())
 
+    def test_async_hybrid_search_falls_back_to_local_rrf(self) -> None:
+        async def _test():
+            retriever = AsyncElasticsearchRetriever(
+                host="https://localhost:9200",
+                api_key="test-key",
+                index="test-index",
+                embedding_model="text-embedding-3-small",
+            )
+            mock_client = AsyncMock()
+            mock_client.search.side_effect = [
+                RuntimeError(
+                    "AuthorizationException(403, 'security_exception', "
+                    "'current license is non-compliant for [Reciprocal Rank Fusion (RRF)]')"
+                ),
+                _mock_search_response(
+                    _make_hit("doc-bm25", "lexical result", 8.0),
+                    _make_hit("doc-shared", "shared result", 7.0),
+                ),
+                _mock_search_response(
+                    _make_hit("doc-vector", "semantic result", 0.9),
+                    _make_hit("doc-shared", "shared result", 0.8),
+                ),
+            ]
+            retriever._client = mock_client
+
+            async def fake_embed(text):
+                return [0.1, 0.2]
+
+            retriever._embed = fake_embed
+            results = await retriever.hybrid_search("query")
+
+            assert [result["doc_id"] for result in results] == [
+                "doc-shared",
+                "doc-bm25",
+                "doc-vector",
+            ]
+            assert retriever._supports_rrf is False
+            assert mock_client.search.call_count == 3
+
+        _run(_test())
+
     def test_async_get(self) -> None:
         async def _test():
             retriever = AsyncElasticsearchRetriever(
@@ -907,3 +1620,143 @@ class TestAsyncElasticsearchRetriever:
             assert any("range" in c for c in filter_clauses)
 
         _run(_test())
+
+
+# ---------------------------------------------------------------------------
+# Async retriever rejection
+# ---------------------------------------------------------------------------
+
+
+def test_rlm_rejects_async_retriever() -> None:
+    """RLM.run() should raise TypeError when given an async retriever."""
+    retriever = AsyncElasticsearchRetriever(
+        host="https://localhost:9200",
+        api_key="test-key",
+        index="test-index",
+    )
+    adapter = FakeAdapter(script=["FINAL: done"])
+    runtime = RLM(adapter=adapter, retriever=retriever)
+
+    with pytest.raises(TypeError, match="async retriever"):
+        runtime.run("test")
+
+
+# ---------------------------------------------------------------------------
+# Cache validation
+# ---------------------------------------------------------------------------
+
+
+def test_invalid_embedding_cache_size_raises() -> None:
+    with pytest.raises(ValueError, match="embedding_cache_size"):
+        ElasticsearchRetriever(
+            host="https://localhost:9200",
+            api_key="test-key",
+            index="test-index",
+            cache_embeddings=True,
+            embedding_cache_size=0,
+        )
+
+
+def test_invalid_result_cache_size_raises() -> None:
+    with pytest.raises(ValueError, match="result_cache_size"):
+        ElasticsearchRetriever(
+            host="https://localhost:9200",
+            api_key="test-key",
+            index="test-index",
+            cache_results=True,
+            result_cache_size=0,
+        )
+
+
+def test_invalid_result_cache_ttl_raises() -> None:
+    with pytest.raises(ValueError, match="result_cache_ttl"):
+        ElasticsearchRetriever(
+            host="https://localhost:9200",
+            api_key="test-key",
+            index="test-index",
+            cache_results=True,
+            result_cache_ttl=0,
+        )
+
+
+def test_async_invalid_embedding_cache_size_raises() -> None:
+    with pytest.raises(ValueError, match="embedding_cache_size"):
+        AsyncElasticsearchRetriever(
+            host="https://localhost:9200",
+            api_key="test-key",
+            index="test-index",
+            cache_embeddings=True,
+            embedding_cache_size=-1,
+        )
+
+
+def test_async_invalid_result_cache_ttl_raises() -> None:
+    with pytest.raises(ValueError, match="result_cache_ttl"):
+        AsyncElasticsearchRetriever(
+            host="https://localhost:9200",
+            api_key="test-key",
+            index="test-index",
+            cache_results=True,
+            result_cache_ttl=-5,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Sensitive fields not in repr
+# ---------------------------------------------------------------------------
+
+
+def test_api_key_not_in_repr() -> None:
+    retriever = ElasticsearchRetriever(
+        host="https://localhost:9200",
+        api_key="super-secret-key",
+        index="test-index",
+        embedding_api_key="another-secret",
+    )
+    r = repr(retriever)
+    assert "super-secret-key" not in r
+    assert "another-secret" not in r
+
+
+# ---------------------------------------------------------------------------
+# Monty REPL retrieval tests
+# ---------------------------------------------------------------------------
+
+try:
+    from pyrlm_runtime.env_monty import MONTY_AVAILABLE
+except ImportError:
+    MONTY_AVAILABLE = False
+
+
+@pytest.mark.skipif(not MONTY_AVAILABLE, reason="pydantic-monty not installed")
+def test_retrieval_functions_registered_in_repl_monty() -> None:
+    """When a retriever is set, es_* functions are available in the Monty REPL."""
+    retriever = InMemoryRetriever({"doc1": "Hello world"})
+    adapter = FakeAdapter(
+        script=[
+            'results = es_search("Hello")\nprint(len(results))',
+            "FINAL: 1",
+        ]
+    )
+
+    runtime = RLM(adapter=adapter, retriever=retriever, repl_backend="monty")
+    output, trace = runtime.run("test", Context.from_text(""))
+
+    assert output == "1"
+
+
+@pytest.mark.skipif(not MONTY_AVAILABLE, reason="pydantic-monty not installed")
+def test_es_get_in_repl_monty() -> None:
+    """es_get() should retrieve full document content in the Monty REPL."""
+    retriever = InMemoryRetriever({"doc1": "Full document content"})
+    adapter = FakeAdapter(
+        script=[
+            'doc = es_get("doc1")\nprint(doc["content"])',
+            "FINAL_VAR: doc",
+        ]
+    )
+
+    runtime = RLM(adapter=adapter, retriever=retriever, repl_backend="monty")
+    output, trace = runtime.run("test", Context.from_text(""))
+
+    assert "Full document content" in output

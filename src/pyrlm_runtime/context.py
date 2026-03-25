@@ -39,6 +39,8 @@ class Context:
 
     def num_documents(self) -> int:
         """Return number of documents (1 for plain text context)."""
+        if self.context_type == "document_list":
+            return len(self.documents)
         return len(self.documents) if self.documents else 1
 
     def get_document(self, index: int) -> str | None:
@@ -49,6 +51,8 @@ class Context:
 
     def document_lengths(self) -> List[int]:
         """Return character lengths of each document."""
+        if self.context_type == "document_list":
+            return [len(doc) for doc in self.documents]
         if not self.documents:
             return [len(self.text)]
         return [len(doc) for doc in self.documents]
@@ -119,6 +123,8 @@ class Context:
 
         Returns list of (start_doc_idx, end_doc_idx, docs_in_chunk).
         """
+        if self.context_type == "document_list" and not self.documents:
+            return []
         if not self.documents:
             return [(0, 1, [self.text])]
 
