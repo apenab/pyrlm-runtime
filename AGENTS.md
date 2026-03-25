@@ -1,4 +1,4 @@
-# CLAUDE.md - Project conventions for pyrlm-runtime
+# AGENTS.md - Project conventions for pyrlm-runtime
 
 ## Project overview
 
@@ -14,24 +14,6 @@ Minimal runtime for Recursive Language Models (RLMs). Python 3.12+, MIT license.
 - **Format**: `uv run ruff format src/ tests/`
 - **Build**: `uv build`
 
-## Project structure
-
-```
-src/pyrlm_runtime/
-  rlm.py          # Core RLM loop (run, subcalls, recursive subcalls)
-  env.py          # PythonREPL (exec-based sandbox), REPLProtocol, ExecResult
-  env_monty.py    # MontyREPL (pydantic-monty Rust sandbox)
-  context.py      # Context dataclass (text, documents, find, chunk, slice)
-  policy.py       # Policy (step/token limits)
-  prompts.py      # System prompts and user message builder
-  retrieval.py    # RetrieverProtocol + ElasticsearchRetriever
-  trace.py        # Trace/TraceStep for execution logging
-  cache.py        # File-based cache for subcall results
-  router.py       # Router for model selection
-  adapters/       # LLM adapters (base, openai_compat, generic_chat, fake)
-tests/
-  test_*.py       # One test file per module
-```
 
 ## Code style
 
@@ -40,6 +22,7 @@ tests/
 - Type hints: use `from __future__ import annotations` in all files
 - Commit messages: conventional commits (`feat:`, `fix:`, `refactor:`, etc.)
 - **Never** add `Co-Authored-By` lines to commits
+- **Always run `uv run ruff check src/ tests/` before committing** — fix any errors before creating the commit
 
 ## Testing conventions
 
