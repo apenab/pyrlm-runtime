@@ -31,7 +31,7 @@ classifiers = [
 dependencies = [
     "httpx>=0.27",
     "python-dotenv>=1.0",
-    "pydantic-monty>=0.0.4",
+    "pydantic-monty>=0.0.4,<0.0.8",
     "google-cloud-aiplatform>=1.60.0",
 ]
 
