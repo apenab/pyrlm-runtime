@@ -1,6 +1,9 @@
+import logging
+
 from pyrlm_runtime import Context, Policy, RLM
-from pyrlm_runtime.adapters import FakeAdapter
+from pyrlm_runtime.adapters import FakeAdapter, ModelResponse, Usage
 from pyrlm_runtime.events import RLMEvent
+from pyrlm_runtime.prompts import build_iteration_message
 
 
 class RecordingListener:
@@ -9,6 +12,25 @@ class RecordingListener:
 
     def handle(self, event: RLMEvent) -> None:
         self.events.append(event)
+
+
+class MetaSequenceAdapter:
+    def __init__(self, responses: list[ModelResponse]) -> None:
+        self._responses = list(responses)
+        self.call_log: list[list[dict[str, str]]] = []
+
+    def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_tokens: int = 512,
+        temperature: float = 0.0,
+    ) -> ModelResponse:
+        del max_tokens, temperature
+        self.call_log.append(list(messages))
+        if not self._responses:
+            raise RuntimeError("MetaSequenceAdapter has no remaining responses")
+        return self._responses.pop(0)
 
 
 def test_rlm_loop_runs_to_final() -> None:
@@ -85,6 +107,231 @@ def test_rlm_with_parallel_subcalls() -> None:
 
     # Should have multiple answers joined
     assert "ans" in output
+
+
+def test_llm_query_json_parses_fenced_json_response() -> None:
+    adapter = FakeAdapter(
+        script=[
+            'data = llm_query_json("extract")\nanswer = str(data["value"])\nprint(answer)',
+            "FINAL_VAR: answer",
+        ]
+    )
+    adapter.add_rule("You are a sub-LLM", '```json\n{"value": 7}\n```')
+
+    context = Context.from_text("Test context.")
+    runtime = RLM(adapter=adapter)
+    output, trace = runtime.run("Test query.", context)
+
+    assert output == "7"
+
+
+def test_llm_batch_records_coerces_common_extraction_shapes() -> None:
+    adapter = FakeAdapter(
+        script=[
+            (
+                'rows = llm_batch_records(["entity-one", "no-answer", "wrapped"])\n'
+                'answer = f"{rows[0][0][\'name\']}|{len(rows[1])}|{rows[2][0][\'name\']}"\n'
+                "print(answer)"
+            ),
+            "FINAL_VAR: answer",
+        ]
+    )
+    adapter.add_rule(r"You are a sub-LLM[\s\S]*entity-one", '[{"name": "A"}]', regex=True)
+    adapter.add_rule(r"You are a sub-LLM[\s\S]*no-answer", '"NO_ANSWER"', regex=True)
+    adapter.add_rule(
+        r"You are a sub-LLM[\s\S]*wrapped",
+        '{"records": [{"name": "B"}]}',
+        regex=True,
+    )
+
+    context = Context.from_text("Test context.")
+    runtime = RLM(adapter=adapter)
+    output, trace = runtime.run("Test query.", context)
+
+    assert output == "A|0|B"
+
+
+def test_llm_extract_comparative_metric_returns_fixed_schema() -> None:
+    adapter = FakeAdapter(
+        script=[
+            (
+                'row = llm_extract_comparative_metric(\n'
+                '    "<!-- Page 7 -->\\n| Importe neto de la cifra de negocios | 2.559,305.749 | 2.502.111.375 |",\n'
+                '    "Importe neto de la cifra de negocios",\n'
+                '    aliases=["Importe de la cifra de negocios"],\n'
+                '    document_hint="GEF"\n'
+                ')\n'
+                'answer = f"{row[\'entity_name\']}|{row[\'recent_year\']}|{row[\'previous_amount_raw\']}"\n'
+                "print(answer)"
+            ),
+            "FINAL_VAR: answer",
+        ]
+    )
+    adapter.add_rule(
+        r"You are a sub-LLM[\s\S]*Metrica objetivo: Importe neto de la cifra de negocios",
+        (
+            '{"entity_name":"GEF","line_item_found":true,'
+            '"line_item_label":"Importe neto de la cifra de negocios",'
+            '"recent_year":2024,"recent_amount_raw":"2.559,305.749",'
+            '"previous_year":2023,"previous_amount_raw":"2.502.111.375",'
+            '"unit_hint":"euros","pages":[7],"evidence":"fila",'
+            '"confidence":"medium","reason":"ok"}'
+        ),
+        regex=True,
+    )
+
+    context = Context.from_text("Test context.")
+    runtime = RLM(adapter=adapter)
+    output, trace = runtime.run("Test query.", context)
+
+    assert output == "GEF|2024|2.502.111.375"
+
+
+def test_parse_amount_text_handles_localized_numbers_and_units() -> None:
+    adapter = FakeAdapter(
+        script=[
+            (
+                'values = [\n'
+                '    parse_amount_text("510.890.761,11"),\n'
+                '    parse_amount_text("19.267", "en millones de euros"),\n'
+                '    parse_amount_text("982.160", "Miles de euros"),\n'
+                '    parse_amount_text("2.559,305.749"),\n'
+                '    parse_amount_text("179.964.152 175.200.881"),\n'
+                ']\n'
+                'answer = "|".join(str(v) for v in values)\n'
+                "print(answer)"
+            ),
+            "FINAL_VAR: answer",
+        ]
+    )
+
+    context = Context.from_text("Test context.")
+    runtime = RLM(adapter=adapter)
+    output, trace = runtime.run("Test query.", context)
+
+    assert output == "510890761.11|19267000000|982160000|2559305749|None"
+
+
+def test_rank_comparative_metric_rows_orders_complete_rows_first() -> None:
+    adapter = FakeAdapter(
+        script=[
+            (
+                'rows = [\n'
+                '    {"entity_name": "A", "recent_year": 2024, "previous_year": 2023, "recent_amount_raw": "200", "previous_amount_raw": "100", "unit_hint": "euros", "line_item_found": True},\n'
+                '    {"entity_name": "B", "recent_year": 2024, "previous_year": 2023, "recent_amount_raw": "150", "previous_amount_raw": "120", "unit_hint": "euros", "line_item_found": True},\n'
+                '    {"entity_name": "C", "recent_year": 2024, "previous_year": None, "recent_amount_raw": "999", "previous_amount_raw": None, "unit_hint": "euros", "line_item_found": True},\n'
+                ']\n'
+                'ranked = rank_comparative_metric_rows(rows)\n'
+                'answer = "|".join(f"{row[\'entity_name\']}:{row.get(\'growth_percent\')}" for row in ranked)\n'
+                'print(answer)\n'
+            ),
+            "FINAL_VAR: answer",
+        ]
+    )
+
+    context = Context.from_text("Test context.")
+    runtime = RLM(adapter=adapter)
+    output, trace = runtime.run("Test query.", context)
+
+    assert output.startswith("A:100.0|B:25.0|C:None")
+
+
+def test_analyze_comparative_metric_rows_returns_report_and_counts() -> None:
+    adapter = FakeAdapter(
+        script=[
+            (
+                'rows = [\n'
+                '    {"entity_name": "A", "logical_doc_id": "doc-a", "recent_year": 2024, "previous_year": 2023, "recent_amount_raw": "200", "previous_amount_raw": "100", "unit_hint": "euros", "line_item_found": True, "selected_pages": [7]},\n'
+                '    {"entity_name": "B", "logical_doc_id": "doc-b", "recent_year": 2024, "previous_year": None, "recent_amount_raw": "150", "previous_amount_raw": None, "unit_hint": "euros", "line_item_found": True, "selected_pages": [2], "reason": "Solo hay un ejercicio"}\n'
+                ']\n'
+                'analysis = analyze_comparative_metric_rows(rows, "Importe neto de la cifra de negocios")\n'
+                'answer = f"{analysis[\'rankable_count\']}|{analysis[\'unresolved_count\']}|{analysis[\'ranked_rows\'][0][\'entity_name\']}|{\'ENTIDADES SIN EXTRACCIÓN FIABLE\' in analysis[\'report\']}"\n'
+                'print(answer)\n'
+            ),
+            "FINAL_VAR: answer",
+        ]
+    )
+
+    context = Context.from_text("Test context.")
+    runtime = RLM(adapter=adapter)
+    output, trace = runtime.run("Test query.", context)
+
+    assert output == "1|1|A|True"
+
+
+def test_render_comparative_metric_report_formats_ranked_and_unresolved_rows() -> None:
+    adapter = FakeAdapter(
+        script=[
+            (
+                'rows = [\n'
+                '    {"entity_name": "A", "logical_doc_id": "doc-a", "recent_year": 2024, "previous_year": 2023, "recent_amount_raw": "200", "previous_amount_raw": "100", "unit_hint": "euros", "line_item_found": True, "selected_pages": [7, 3, 7]},\n'
+                '    {"entity_name": "B", "logical_doc_id": "doc-b", "recent_year": 2024, "previous_year": None, "recent_amount_raw": "150", "previous_amount_raw": None, "unit_hint": "euros", "line_item_found": True, "selected_pages": [3, 1, 2], "reason": "Solo hay un ejercicio.Indexed logical document appears incomplete (10/140 pages indexed)."}\n'
+                ']\n'
+                'report = render_comparative_metric_report(rows, "Importe neto de la cifra de negocios")\n'
+                'print(report)\n'
+            ),
+            "FINAL_VAR: report",
+        ]
+    )
+
+    context = Context.from_text("Test context.")
+    runtime = RLM(adapter=adapter)
+    output, trace = runtime.run("Test query.", context)
+
+    assert "1. A" in output
+    assert "Documento fuente: doc-a" in output
+    assert "Páginas: [3, 7]" in output
+    assert "ENTIDADES SIN EXTRACCIÓN FIABLE" in output
+    assert "Páginas analizadas: [1, 2, 3]" in output
+    assert "Solo hay un ejercicio. Indexed logical document appears incomplete" in output
+    assert "Variación porcentual: 100 %" in output
+
+
+def test_render_comparative_metric_report_softens_incomplete_index_note_when_one_period_found() -> None:
+    adapter = FakeAdapter(
+        script=[
+            (
+                'rows = [\n'
+                '    {"entity_name": "B", "logical_doc_id": "doc-b", "recent_year": 2024, "previous_year": None, "recent_amount_raw": "150", "previous_amount_raw": None, "unit_hint": "euros", "line_item_found": True, "selected_pages": [3, 1, 2], "index_incomplete": True, "reason": "Solo hay un ejercicio"}\n'
+                ']\n'
+                'report = render_comparative_metric_report(rows, "Importe neto de la cifra de negocios")\n'
+                'print(report)\n'
+            ),
+            "FINAL_VAR: report",
+        ]
+    )
+
+    context = Context.from_text("Test context.")
+    runtime = RLM(adapter=adapter)
+    output, trace = runtime.run("Test query.", context)
+
+    assert "Páginas analizadas: [1, 2, 3]" in output
+    assert "sólo se identificó un ejercicio" in output
+    assert "Motivo de no extracción: Solo hay un ejercicio" in output
+
+
+def test_render_comparative_metric_report_formats_localized_numbers() -> None:
+    adapter = FakeAdapter(
+        script=[
+            (
+                'rows = [\n'
+                '    {"entity_name": "A", "logical_doc_id": "doc-a", "recent_year": 2024, "previous_year": 2023, "recent_amount_raw": "6230527,52", "previous_amount_raw": "2505687,72", "unit_hint": "euros", "line_item_found": True, "recent_amount": 6230527.52, "previous_amount": 2505687.72, "growth_absolute": 3724839.8, "growth_percent": 148.6553879, "selected_pages": [5]}\n'
+                ']\n'
+                'report = render_comparative_metric_report(rows, "Importe neto de la cifra de negocios")\n'
+                'print(report)\n'
+            ),
+            "FINAL_VAR: report",
+        ]
+    )
+
+    context = Context.from_text("Test context.")
+    runtime = RLM(adapter=adapter)
+    output, trace = runtime.run("Test query.", context)
+
+    assert "normalizado: 6.230.527,52" in output
+    assert "normalizado: 2.505.687,72" in output
+    assert "Variación absoluta: 3.724.839,8" in output
+    assert "Variación porcentual: 148,66 %" in output
 
 
 def test_recursive_subcall_uses_configured_repl_backend(tmp_path) -> None:
@@ -198,6 +445,154 @@ def test_conversation_history_contains_previous_output() -> None:
     # Message at index 3: user with REPL result containing stdout
     assert second_call_msgs[3]["role"] == "user"
     assert "hello_marker" in second_call_msgs[3]["content"]
+
+
+def test_conversation_history_contains_state_summary_after_silent_repl_step() -> None:
+    """Silent REPL steps should still surface created state to the next turn."""
+    adapter = FakeAdapter(
+        script=[
+            "values = [1, 2, 3]\nsummary = {'count': len(values)}",
+            'answer = str(summary["count"])\nprint(answer)',
+            "FINAL_VAR: answer",
+        ]
+    )
+    context = Context.from_text("test")
+    runtime = RLM(adapter=adapter, conversation_history=True)
+    output, trace = runtime.run("Count values.", context)
+
+    assert output == "3"
+    second_call_msgs = adapter.call_log[1]
+    assert second_call_msgs[3]["role"] == "user"
+    assert "stdout:\n<none>" in second_call_msgs[3]["content"]
+    assert "error:\n<none>" in second_call_msgs[3]["content"]
+    assert "state:" in second_call_msgs[3]["content"]
+    assert "values = list[len=3]" in second_call_msgs[3]["content"]
+    assert "summary = dict[len=1]" in second_call_msgs[3]["content"]
+
+
+def test_empty_length_responses_abort_with_explicit_no_answer(caplog) -> None:
+    adapter = MetaSequenceAdapter([
+        ModelResponse(
+            text="",
+            usage=Usage(100, 40, 140),
+            meta={
+                "provider": "openai_compatible",
+                "finish_reason": "length",
+                "content_kind": "null",
+                "reasoning_present": True,
+            },
+        ),
+        ModelResponse(
+            text="",
+            usage=Usage(120, 45, 165),
+            meta={
+                "provider": "openai_compatible",
+                "finish_reason": "length",
+                "content_kind": "null",
+                "reasoning_present": True,
+            },
+        ),
+    ])
+    runtime = RLM(
+        adapter=adapter,
+        invalid_response_limit=2,
+        rlm_diagnostics=True,
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="pyrlm_runtime"):
+        output, trace = runtime.run("Q?", Context.from_text("context"))
+
+    assert output == "NO_ANSWER"
+    assert len(adapter.call_log) == 2
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "invalid_response_detail=" in log_text
+    assert '"detail": "empty_content_length"' in log_text
+    assert "empty_length limit reached (2), aborting with NO_ANSWER" in log_text
+
+
+def test_invalid_response_limit_resets_after_valid_code_step() -> None:
+    adapter = FakeAdapter(
+        script=[
+            "",
+            'answer = "ok"\nprint(answer)',
+            "",
+            "FINAL_VAR: answer",
+        ]
+    )
+    runtime = RLM(
+        adapter=adapter,
+        invalid_response_limit=2,
+        fallback_code='print("fallback-ran")',
+    )
+
+    output, trace = runtime.run("Q?", Context.from_text("context"))
+
+    assert output == "ok"
+    assert not any(step.stdout == "fallback-ran\n" for step in trace.steps)
+
+
+def test_rlm_diagnostics_logging_is_opt_in(caplog) -> None:
+    runtime_on = RLM(
+        adapter=FakeAdapter(script=["FINAL: done"]),
+        rlm_diagnostics=True,
+    )
+    with caplog.at_level(logging.DEBUG, logger="pyrlm_runtime"):
+        output_on, trace_on = runtime_on.run("Q?", Context.from_text("context"))
+
+    assert output_on == "done"
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "runtime_fingerprint=" in log_text
+    assert "root_call request_meta=" in log_text
+    assert "root_call response_meta=" in log_text
+
+    caplog.clear()
+
+    runtime_off = RLM(
+        adapter=FakeAdapter(script=["FINAL: done"]),
+        rlm_diagnostics=False,
+    )
+    with caplog.at_level(logging.DEBUG, logger="pyrlm_runtime"):
+        output_off, trace_off = runtime_off.run("Q?", Context.from_text("context"))
+
+    assert output_off == "done"
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "runtime_fingerprint=" not in log_text
+    assert "root_call request_meta=" not in log_text
+    assert "root_call response_meta=" not in log_text
+
+
+def test_build_iteration_message_truncates_large_stdout() -> None:
+    huge_stdout = "X" * 5000
+
+    msg = build_iteration_message(
+        last_stdout=huge_stdout,
+        last_error=None,
+        last_state_summary=None,
+        step=2,
+        max_steps=40,
+    )
+
+    assert "stdout:\n" in msg
+    assert "...[truncated " in msg
+    assert len(msg) < 2600
+
+
+def test_max_tokens_exceeded_executes_last_code_and_returns_materialized_answer() -> None:
+    adapter = MetaSequenceAdapter([
+        ModelResponse(
+            text='final_answer = "done"\nprint(final_answer)',
+            usage=Usage(10, 10, 20),
+        ),
+    ])
+    runtime = RLM(
+        adapter=adapter,
+        policy=Policy(max_total_tokens=5),
+    )
+
+    output, trace = runtime.run("Q?", Context.from_text("context"))
+
+    assert output == "done"
+    assert any(step.kind == "repl_exec" and step.stdout == "done\n" for step in trace.steps)
 
 
 def test_conversation_history_trimming() -> None:
@@ -506,4 +901,36 @@ def test_event_listener_emits_run_and_step_events_with_enriched_trace() -> None:
     assert subcall_step.output == "ok"
     assert listener.events[-1].tokens_used == sum(
         step.usage.total_tokens for step in trace.steps if step.usage is not None
+    )
+
+
+def test_run_logs_full_final_answer(caplog) -> None:
+    answer = "Resultado final " + ("muy largo " * 30).strip()
+    adapter = FakeAdapter(script=[f"FINAL: {answer}"])
+
+    runtime = RLM(adapter=adapter)
+    with caplog.at_level(logging.INFO, logger="pyrlm_runtime"):
+        output, _trace = runtime.run("Return a result.", Context.from_text("ctx"))
+
+    assert output == answer
+    assert any(
+        record.name == "pyrlm_runtime" and record.getMessage() == f"final answer={answer}"
+        for record in caplog.records
+    )
+
+
+def test_multiline_final_answer_is_preserved() -> None:
+    adapter = FakeAdapter(
+        script=[
+            "FINAL: Resumen de ingresos:\n\n1) Empresa A | 2024 | 100\n2) Empresa B | 2023 | 80"
+        ]
+    )
+
+    runtime = RLM(adapter=adapter)
+    output, _trace = runtime.run("Return a result.", Context.from_text("ctx"))
+
+    assert output == (
+        "Resumen de ingresos:\n\n"
+        "1) Empresa A | 2024 | 100\n"
+        "2) Empresa B | 2023 | 80"
     )

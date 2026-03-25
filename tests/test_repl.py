@@ -14,6 +14,18 @@ def test_repl_persistence_and_restrictions() -> None:
     assert blocked_open.error is not None
 
 
+def test_syntax_error_includes_line_detail_and_hint_for_large_blocks() -> None:
+    repl = PythonREPL()
+    lines = [f"x{i} = {i}" for i in range(85)]
+    lines.append("if True print('boom')")
+    result = repl.exec("\n".join(lines))
+
+    assert result.error is not None
+    assert "SyntaxError: invalid syntax at line 86" in result.error
+    assert "if True print('boom')" in result.error
+    assert "Hint: split the task into smaller Python blocks." in result.error
+
+
 # ---------------------------------------------------------------------------
 # show_vars and restore_names — mirrors original alexzhang13/rlm design
 # ---------------------------------------------------------------------------

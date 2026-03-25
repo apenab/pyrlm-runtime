@@ -78,9 +78,13 @@ Strategy for structured data tasks (dates, labels, user IDs):
 
 2. For large contexts (>32K chars), split with ctx.chunk() and process each
    chunk with Python string operations — not subcalls.
-   Example:
+   IMPORTANT: When COUNTING exact occurrences, use overlap=0 to avoid
+   double-counting items that fall in overlap zones. Only use overlap>0
+   when you need complete sentences at chunk boundaries (e.g., for semantic
+   classification of individual items).
+   Example (counting):
    ```python
-   chunks = ctx.chunk(20000, overlap=200)
+   chunks = ctx.chunk(20000, overlap=0)
    total = 0
    for start, end, text in chunks:
        total += text.count("True")
