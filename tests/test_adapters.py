@@ -365,6 +365,54 @@ class TestGenericChatAdapterComplete:
         result = adapter.complete(MESSAGES)
         assert result.text == "custom"
         assert result.usage.total_tokens == 2
+        # Custom parser responses without "choices" should produce no synthetic meta
+        assert result.meta == {}
+        adapter.close()
+
+    def test_list_content_parsed_and_meta_populated(self) -> None:
+        body = {
+            "choices": [{
+                "message": {
+                    "content": [
+                        {"type": "output_text", "text": "hello"},
+                        {"type": "output_text", "text": "world"},
+                    ],
+                },
+                "finish_reason": "length",
+            }],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 4, "total_tokens": 9},
+        }
+        resp = httpx.Response(200, json=body)
+        adapter = GenericChatAdapter(endpoint="http://x", max_retries=0)
+        adapter._client = httpx.Client(transport=httpx.MockTransport(lambda _: resp))
+
+        result = adapter.complete(MESSAGES)
+
+        assert result.text == "hello\nworld"
+        assert result.meta is not None
+        assert result.meta["finish_reason"] == "length"
+        assert result.meta["content_kind"] == "list"
+        assert result.meta["reasoning_present"] is False
+        adapter.close()
+
+    def test_empty_list_content_produces_empty_text(self) -> None:
+        body = {
+            "choices": [{
+                "message": {"content": []},
+                "finish_reason": "length",
+            }],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 0, "total_tokens": 5},
+        }
+        resp = httpx.Response(200, json=body)
+        adapter = GenericChatAdapter(endpoint="http://x", max_retries=0)
+        adapter._client = httpx.Client(transport=httpx.MockTransport(lambda _: resp))
+
+        result = adapter.complete(MESSAGES)
+
+        assert result.text == ""
+        assert result.meta is not None
+        assert result.meta["content_kind"] == "list"
+        assert result.meta["finish_reason"] == "length"
         adapter.close()
 
 

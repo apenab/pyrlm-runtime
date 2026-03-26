@@ -55,12 +55,16 @@ def _summarize_value(value: Any) -> str:
         return f"set[len={len(value)}]"
     if isinstance(value, dict):
         keys = list(value.keys())
-        preview = _truncate_repr(keys[:3], max_chars=50)
-        suffix = "" if len(keys) <= 3 else ", ..."
+        safe_keys = [
+            k if isinstance(k, (str, int, float, bool)) else type(k).__name__
+            for k in keys[:3]
+        ]
+        suffix = ", ..." if len(keys) > 3 else ""
+        preview = _truncate_repr(safe_keys, max_chars=50)
         return f"dict[len={len(value)}] keys={preview}{suffix}"
     if isinstance(value, (int, float, bool)):
         return f"{type(value).__name__}({_truncate_repr(value, max_chars=32)})"
-    return f"{type(value).__name__}({_truncate_repr(value, max_chars=60)})"
+    return type(value).__name__
 
 
 def _snapshot_user_state(values: Dict[str, Any], scaffold: set[str] | None = None) -> Dict[str, str]:
