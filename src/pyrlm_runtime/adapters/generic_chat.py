@@ -223,7 +223,7 @@ class GenericChatAdapter(ModelAdapter):
         if not response.is_success:
             try:
                 err_body = response.json()
-                err_msg = err_body.get("error", {}).get("message") or response.text
+                err_msg = str(err_body.get("error", {}).get("message") or response.text)
             except Exception:
                 err_msg = response.text
             logger.debug("HTTP %d body: %s", response.status_code, err_msg[:500])
@@ -239,7 +239,7 @@ class GenericChatAdapter(ModelAdapter):
         except (KeyError, IndexError, TypeError) as e:
             raise ValueError(f"Unexpected response structure from {self.endpoint}: {e}") from e
 
-        meta = _extract_response_meta(data)
+        meta = _extract_response_meta(data) if "choices" in data else {}
         finish_reason = meta.get("finish_reason")
         if isinstance(content, str) and not content.strip() and finish_reason:
             logger.warning("Empty content with finish_reason=%s", finish_reason)

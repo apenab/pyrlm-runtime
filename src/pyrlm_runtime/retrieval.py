@@ -383,7 +383,18 @@ def _stitch_logical_document(
 
 
 def _disable_google_ssl_verify() -> None:
-    """Disable SSL verification for Google auth/API transports."""
+    """Disable SSL verification for Google auth/API transports.
+
+    .. warning::
+        This function monkey-patches ``requests.Session.request`` **globally**,
+        affecting every HTTP request made in the current process for the lifetime
+        of the interpreter.  It is triggered by setting
+        ``embedding_ssl_verify=False`` on a retriever.  Only use it in
+        controlled, single-tenant environments where you explicitly opt in to
+        skipping TLS verification (e.g. self-signed certificates in a local
+        development cluster).  Never call this in multi-tenant or
+        shared-process contexts.
+    """
     import requests
     import urllib3
 
@@ -446,7 +457,8 @@ class RetrieverProtocol(Protocol):
     ) -> list[dict[str, Any]]:
         """Lexical / keyword search (e.g. BM25).
 
-        Returns list of ``{doc_id, preview, score, metadata}``.
+        Returns list of ``{doc_id, content, preview, score, metadata}``.
+        ``content`` is the full document text; ``preview`` is a truncated snippet.
         """
         ...
 
@@ -459,7 +471,8 @@ class RetrieverProtocol(Protocol):
     ) -> list[dict[str, Any]]:
         """Embedding-based semantic search.
 
-        Returns list of ``{doc_id, preview, score, metadata}``.
+        Returns list of ``{doc_id, content, preview, score, metadata}``.
+        ``content`` is the full document text; ``preview`` is a truncated snippet.
         """
         ...
 
@@ -472,7 +485,8 @@ class RetrieverProtocol(Protocol):
     ) -> list[dict[str, Any]]:
         """Hybrid lexical + semantic retrieval (e.g. RRF).
 
-        Returns list of ``{doc_id, preview, score, metadata}``.
+        Returns list of ``{doc_id, content, preview, score, metadata}``.
+        ``content`` is the full document text; ``preview`` is a truncated snippet.
         """
         ...
 
@@ -721,6 +735,7 @@ class ElasticsearchRetriever:
         result = {
             "doc_id": page_doc_id,
             "page_doc_id": page_doc_id,
+            "content": content,
             "preview": self._preview(content),
             "score": hit.get("_score", 0.0),
             "metadata": metadata,
@@ -1193,6 +1208,7 @@ class AsyncElasticsearchRetriever:
         result = {
             "doc_id": page_doc_id,
             "page_doc_id": page_doc_id,
+            "content": content,
             "preview": self._preview(content),
             "score": hit.get("_score", 0.0),
             "metadata": metadata,

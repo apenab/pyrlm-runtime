@@ -123,13 +123,12 @@ class Context:
 
         Returns list of (start_doc_idx, end_doc_idx, docs_in_chunk).
         """
+        if docs_per_chunk <= 0:
+            raise ValueError("docs_per_chunk must be > 0")
         if self.context_type == "document_list" and not self.documents:
             return []
         if not self.documents:
             return [(0, 1, [self.text])]
-
-        if docs_per_chunk <= 0:
-            raise ValueError("docs_per_chunk must be > 0")
 
         chunks: List[Tuple[int, int, List[str]]] = []
         num_docs = len(self.documents)

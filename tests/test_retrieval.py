@@ -35,7 +35,7 @@ class InMemoryRetriever:
             if query.lower() in content.lower():
                 results.append({
                     "doc_id": doc_id,
-                    "preview": content[:200],
+                    "content": content,
                     "score": 1.0,
                     "metadata": {},
                 })
