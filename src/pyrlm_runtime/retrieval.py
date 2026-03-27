@@ -629,7 +629,7 @@ class ElasticsearchRetriever:
 
     # Proxy / TLS
     es_proxy: str | None = None
-    verify_certs: bool = False
+    verify_certs: bool = True
 
     # Cache configuration
     cache_embeddings: bool = True
@@ -1086,6 +1086,14 @@ class AsyncElasticsearchRetriever:
     for the synchronous Monty REPL.
 
     Supports the same cache configuration as :class:`ElasticsearchRetriever`.
+
+    .. note::
+        Proxy and TLS certificate-verification settings (``es_proxy``,
+        ``verify_certs``) are not supported by this class.  Ensure proper
+        TLS configuration at the network/infrastructure level, or use
+        :class:`ElasticsearchRetriever` when proxy or custom TLS settings
+        are required.
+
     Use as an async context manager to ensure proper resource cleanup::
 
         async with AsyncElasticsearchRetriever(...) as retriever:
