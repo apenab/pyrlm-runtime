@@ -788,11 +788,13 @@ class RLM:
 
         def llm_query_json(
             prompt: str,
+            text: str | None = None,
             *,
             model: str | None = None,
             max_tokens: int | None = None,
         ) -> Any:
-            raw = subcall(prompt, model=model, max_tokens=max_tokens)
+            full_prompt = f"{prompt}\n\n{text}" if text else prompt
+            raw = subcall(full_prompt, model=model, max_tokens=max_tokens)
             return _parse_jsonish_response(raw)
 
         def _coerce_json_records(parsed: Any) -> list[dict[str, Any]]:
@@ -1063,31 +1065,34 @@ class RLM:
                 return collapsed[:top_k]
 
             def es_search(
-                query: str, top_k: int = 10, filters: dict | None = None
+                query: str, top_k: int = 10, filters: dict | None = None,
+                deduplicate_by_doc: bool = False,
             ) -> list[dict]:
                 results = _normalize_search_results(
-                    _retriever.search(query, top_k=top_k, filters=filters)
+                    _retriever.search(query, top_k=top_k if not deduplicate_by_doc else top_k * 8, filters=filters)
                 )
                 _log_search_result_schema("es_search", results)
-                return results
+                return _collapse_doc_results(results, top_k=top_k) if deduplicate_by_doc else results
 
             def es_vector_search(
-                query: str, top_k: int = 10, filters: dict | None = None
+                query: str, top_k: int = 10, filters: dict | None = None,
+                deduplicate_by_doc: bool = False,
             ) -> list[dict]:
                 results = _normalize_search_results(
-                    _retriever.vector_search(query, top_k=top_k, filters=filters)
+                    _retriever.vector_search(query, top_k=top_k if not deduplicate_by_doc else top_k * 8, filters=filters)
                 )
                 _log_search_result_schema("es_vector_search", results)
-                return results
+                return _collapse_doc_results(results, top_k=top_k) if deduplicate_by_doc else results
 
             def es_hybrid_search(
-                query: str, top_k: int = 10, filters: dict | None = None
+                query: str, top_k: int = 10, filters: dict | None = None,
+                deduplicate_by_doc: bool = False,
             ) -> list[dict]:
                 results = _normalize_search_results(
-                    _retriever.hybrid_search(query, top_k=top_k, filters=filters)
+                    _retriever.hybrid_search(query, top_k=top_k if not deduplicate_by_doc else top_k * 8, filters=filters)
                 )
                 _log_search_result_schema("es_hybrid_search", results)
-                return results
+                return _collapse_doc_results(results, top_k=top_k) if deduplicate_by_doc else results
 
             def es_hybrid_doc_search(
                 query: str,
