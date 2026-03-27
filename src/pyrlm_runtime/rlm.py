@@ -278,13 +278,14 @@ class RLM:
         if self.retriever is not None:
             import inspect
 
-            search_method = getattr(self.retriever, "search", None)
-            if search_method is not None and inspect.iscoroutinefunction(search_method):
-                raise TypeError(
-                    "RLM.run() requires a synchronous retriever, but received an "
-                    f"async retriever ({type(self.retriever).__name__}). "
-                    "Use a synchronous retriever like ElasticsearchRetriever instead."
-                )
+            for _method_name in ("search", "vector_search", "hybrid_search", "get"):
+                _method = getattr(self.retriever, _method_name, None)
+                if _method is not None and inspect.iscoroutinefunction(_method):
+                    raise TypeError(
+                        "RLM.run() requires a synchronous retriever, but received an "
+                        f"async retriever ({type(self.retriever).__name__}). "
+                        "Use a synchronous retriever like ElasticsearchRetriever instead."
+                    )
         if context is None:
             if self.retriever is not None:
                 context = Context.from_documents([])
@@ -1509,6 +1510,15 @@ class RLM:
             return None
 
         def maybe_finish_common_result_var() -> str | None:
+            if not _can_finalize(
+                require_repl=self.require_repl_before_final,
+                repl_executed=repl_executed,
+                require_subcall=self.require_subcall_before_final,
+                subcall_made=subcall_made,
+                min_steps=self.min_steps,
+                current_step=policy.steps,
+            ):
+                return None
             for var_name in ("final_answer", "answer", "result", "summary"):
                 value = repl.get(var_name)
                 if not isinstance(value, str):
@@ -2285,7 +2295,7 @@ def _looks_like_code(text: str) -> bool:
         return True
     if re.match(r"^P(?:\.|\[|\(|\s*=)", first):
         return True
-    if re.match(r"^(?:ask(?:_[A-Za-z0-9]+)?|llm_(?:query|batch)(?:_[A-Za-z0-9]+)?|extract_after|es_[A-Za-z0-9_]+|SHOW_VARS)\s*\(", first):
+    if re.match(r"^(?:ask(?:_[A-Za-z0-9]+)?|llm_(?:query|batch)(?:_[A-Za-z0-9]+)?|extract_after|es_[A-Za-z0-9_]+|SHOW_VARS|peek|tail|lenP)\s*\(", first):
         return True
     return False
 
