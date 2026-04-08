@@ -94,7 +94,8 @@ jobs:
 
       - name: Push changes and tags
         run: |
-          git push --follow-tags
+          git push origin main
+          git push origin "v${{ steps.bump.outputs.version }}"
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
