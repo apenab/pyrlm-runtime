@@ -1,3 +1,29 @@
+## v0.4.0 (2026-04-08)
+
+### Feat
+
+- **doctools**: Implement document access tools and policies
+- extend retrieval with page-level ops, REPL extensions, diagnostics, and hardening
+- add retrieval functionality to RLM with Elasticsearch support
+- Update rich REPL demo for Azure GPT-5.1 and enhance environment variable handling
+- Add AzureOpenAIAdapter and connectivity check for Azure environment variables
+- Implemented llm_batch for parallel processing of prompts and enhance traceability
+
+### Fix
+
+- enhance RLM to validate synchronous retriever methods and update code pattern matching
+- enable TLS certificate verification for ElasticsearchRetriever and update AsyncElasticsearchRetriever documentation
+- enhance search functions to support deduplication and improve prompt handling
+- code review fixes for generic_chat, env, context, retrieval
+- pin pydantic-monty<0.0.8 and skip tests for unimplemented functions
+- updated agents.md
+- pass log_truncate_code into _run_recursive_subcall to fix F821 lint errors
+- multiple corrections
+
+### Perf
+
+- Added Oolong benchmark script for baseline vs RLM evaluation
+
 ## v0.3.0 (2026-03-09)
 
 ### Feat
