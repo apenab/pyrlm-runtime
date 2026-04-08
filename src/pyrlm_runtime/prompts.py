@@ -260,11 +260,16 @@ def build_system_prompt(
     base_prompt: str,
     *,
     retriever_available: bool = False,
+    doc_tools_available: bool = False,
 ) -> str:
-    """Build the effective system prompt, appending retrieval docs if configured."""
+    """Build the effective system prompt, appending supplements as configured."""
+    prompt = base_prompt
     if retriever_available:
-        return base_prompt + RETRIEVAL_SYSTEM_PROMPT_SUPPLEMENT
-    return base_prompt
+        prompt += RETRIEVAL_SYSTEM_PROMPT_SUPPLEMENT
+    if doc_tools_available:
+        from pyrlm_runtime.doctools.prompts import DOC_TOOLS_PROMPT_SUPPLEMENT
+        prompt += DOC_TOOLS_PROMPT_SUPPLEMENT
+    return prompt
 
 
 def build_root_user_message(

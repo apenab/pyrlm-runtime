@@ -210,6 +210,14 @@ class RLM:
     # auto_finalize_var matches any pattern the answer is rejected and the
     # loop continues.
     auto_finalize_reject_patterns: list[str] | None = None
+    # Maximum number of times auto_finalize_var is allowed to match a reject
+    # pattern before the answer is accepted anyway.  Prevents an infinite loop
+    # when the LLM cannot produce a non-matching answer within the step budget.
+    auto_finalize_reject_limit: int = 3
+    # Optional feedback template shown to the LLM when auto_finalize_var matches a
+    # reject pattern.  Supports placeholders: {var}, {pattern}, {count}, {limit},
+    # {remaining}.  When None, a built-in escalating default is used.
+    auto_finalize_reject_feedback: str | None = None
     logger: logging.Logger | None = None
     invalid_response_limit: int | None = None
     fallback_code: str | None = None
@@ -259,6 +267,10 @@ class RLM:
     repl_extensions: Any | None = None
     # Optional extra system prompt text appended after retrieval docs.
     system_prompt_supplement: str = ""
+    # Optional doc tools: a dict of {name: callable} injected into the REPL
+    # scaffold when the RLM should have on-demand PDF access (inspect mode).
+    # Follows the same plugin pattern as retriever and repl_extensions.
+    doc_tools: dict[str, Any] | None = None
     # Truncation limits for debug log messages (chars).
     log_truncate_code: int = 2000
     log_truncate_output: int = 1000
@@ -1119,6 +1131,13 @@ class RLM:
                 _log_search_result_schema("es_hybrid_search_in_doc", results)
                 return results
 
+            def es_list_logical_doc_ids(max_docs: int = 10000) -> list[str]:
+                """Return all unique logical document IDs in the index (no RRF)."""
+                list_fn = getattr(_retriever, "list_logical_doc_ids", None)
+                if not callable(list_fn):
+                    raise NotImplementedError("Retriever does not support list_logical_doc_ids().")
+                return list_fn(max_docs=max_docs)
+
             def _get_document_with_fallback(doc_id: str) -> dict[str, Any]:
                 try:
                     return _retriever.get(doc_id)
@@ -1340,6 +1359,7 @@ class RLM:
                 "es_get_text": es_get_text,
                 "es_get_pages": es_get_pages,
                 "es_get_pages_text": es_get_pages_text,
+                "es_list_logical_doc_ids": es_list_logical_doc_ids,
             }
             for name, fn in _retrieval_fns.items():
                 repl.set(name, fn)
@@ -1354,6 +1374,13 @@ class RLM:
                 log_diag=log_diag,
             ) or {}
             for name, fn in _extension_fns.items():
+                repl.set(name, fn)
+
+        # -- Doc tools (on-demand PDF access, e.g. inspect mode) -------------
+        _doc_tools_fns: dict[str, Any] = {}
+        if self.doc_tools:
+            _doc_tools_fns = dict(self.doc_tools)
+            for name, fn in _doc_tools_fns.items():
                 repl.set(name, fn)
 
         # Scaffold: mapping of every injected name → its current value.
@@ -1382,6 +1409,7 @@ class RLM:
             "SHOW_VARS": show_vars_fn,
             **_retrieval_fns,
             **_extension_fns,
+            **_doc_tools_fns,
         }
         # Inform REPL backends with SHOW_VARS support which names belong to
         # the scaffold so user-facing variable dumps can hide framework internals.
@@ -1455,9 +1483,11 @@ class RLM:
         empty_length_streak = 0
         fallback_executed = False
         repl_errors = 0
+        reject_pattern_blocks = 0
+        _abort = False
 
         def maybe_auto_finalize() -> str | None:
-            nonlocal last_error
+            nonlocal last_error, reject_pattern_blocks, _abort
             if not self.auto_finalize_var:
                 return None
             value = repl.get(self.auto_finalize_var)
@@ -1477,19 +1507,50 @@ class RLM:
                 ):
                     last_error = (
                         f"Auto-finalize blocked: answer too short ({len(cleaned)} chars, "
-                        f"minimum {self.auto_finalize_min_length}). Keep processing."
+                        f"minimum {self.auto_finalize_min_length}). "
+                        f"Extract more data and build a complete answer — do not summarize progress."
                     )
+                    # Clear the variable so fallback_guard can fire and FINAL_VAR
+                    # cannot resurrect this stale short value in a later step.
+                    repl.set(self.auto_finalize_var, None)
                     return None
                 if self.auto_finalize_reject_patterns:
                     import re
 
                     for pattern in self.auto_finalize_reject_patterns:
                         if re.search(pattern, cleaned, re.IGNORECASE):
-                            last_error = (
-                                f"Auto-finalize blocked: answer matches reject pattern "
-                                f"'{pattern}'. Rewrite {self.auto_finalize_var} with the "
-                                f"FULL content — do not use references."
-                            )
+                            reject_pattern_blocks += 1
+                            if reject_pattern_blocks >= self.auto_finalize_reject_limit:
+                                logger.warning(
+                                    "reject_pattern_blocks limit reached (%d/%d); "
+                                    "aborting run (pattern '%s').",
+                                    reject_pattern_blocks,
+                                    self.auto_finalize_reject_limit,
+                                    pattern,
+                                )
+                                _abort = True
+                                return None
+                            remaining = self.auto_finalize_reject_limit - reject_pattern_blocks
+                            if self.auto_finalize_reject_feedback:
+                                last_error = self.auto_finalize_reject_feedback.format(
+                                    var=self.auto_finalize_var,
+                                    pattern=pattern,
+                                    count=reject_pattern_blocks,
+                                    limit=self.auto_finalize_reject_limit,
+                                    remaining=remaining,
+                                )
+                            else:
+                                last_error = (
+                                    f"Auto-finalize blocked ({reject_pattern_blocks}"
+                                    f"/{self.auto_finalize_reject_limit}): answer matches "
+                                    f"reject pattern '{pattern}'. {remaining} attempt(s) left "
+                                    f"before abort. Do NOT describe your progress or next steps. "
+                                    f"Set {self.auto_finalize_var} to the ACTUAL answer with "
+                                    f"real extracted data."
+                                )
+                            # Clear the variable so fallback_guard can fire and FINAL_VAR
+                            # cannot resurrect this stale exploration-text value later.
+                            repl.set(self.auto_finalize_var, None)
                             return None
                 value = cleaned
             if self.min_steps > 0 and policy.steps < self.min_steps:
@@ -1612,6 +1673,7 @@ class RLM:
         effective_system_prompt = build_system_prompt(
             self.system_prompt,
             retriever_available=self.retriever is not None,
+            doc_tools_available=self.doc_tools is not None,
         )
         if self.system_prompt_supplement:
             effective_system_prompt += self.system_prompt_supplement
@@ -1783,13 +1845,10 @@ class RLM:
                 )
                 cleaned = response.text.strip()
                 final = _parse_final(cleaned)
-                # Try auto-finalize first
-                if self.auto_finalize_var:
-                    value = repl.get(self.auto_finalize_var)
-                    if value is not None:
-                        text = str(value).strip()
-                        if text and text.upper() != "NO_ANSWER":
-                            return finish(text)
+                # Try auto-finalize first (via maybe_auto_finalize to respect reject patterns)
+                resolved = maybe_auto_finalize()
+                if resolved is not None:
+                    return finish(resolved)
                 resolved = maybe_finish_common_result_var()
                 if resolved is not None:
                     return finish(resolved)
@@ -2164,6 +2223,22 @@ class RLM:
             resolved = maybe_auto_finalize()
             if resolved is not None:
                 return finish(resolved)
+            if _abort:
+                # Graceful abort: salvage the best available partial answer rather
+                # than returning empty output.  Accept auto_finalize_var even if it
+                # matched a reject pattern — partial data beats silence.
+                if self.auto_finalize_var:
+                    value = repl.get(self.auto_finalize_var)
+                    if value is not None:
+                        text = str(value).strip()
+                        if text and text.upper() != "NO_ANSWER":
+                            return finish(text)
+                resolved = maybe_finish_common_result_var()
+                if resolved is not None:
+                    return finish(resolved)
+                if last_stdout and last_stdout.strip():
+                    return finish(last_stdout.strip())
+                return finish("NO_ANSWER")
             if maybe_run_subcall_guard():
                 resolved = maybe_auto_finalize()
                 if resolved is not None:
