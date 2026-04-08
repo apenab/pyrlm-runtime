@@ -1071,6 +1071,28 @@ class ElasticsearchRetriever:
             vector_field=self.vector_field,
         )
 
+    def list_logical_doc_ids(self, *, max_docs: int = 10000) -> list[str]:
+        """Return all unique ``doc_id`` values in the index.
+
+        Uses a terms aggregation so it does not depend on RRF or vector search.
+        Results are sorted alphabetically.
+        """
+        es = self._get_client()
+        body: dict[str, Any] = {
+            "size": 0,
+            "aggs": {
+                "doc_ids": {
+                    "terms": {
+                        "field": "doc_id",
+                        "size": max_docs,
+                    }
+                }
+            },
+        }
+        resp = es.search(index=self.index, body=body)
+        buckets = resp.get("aggregations", {}).get("doc_ids", {}).get("buckets", [])
+        return sorted(b["key"] for b in buckets if b.get("key"))
+
 
 # ---------------------------------------------------------------------------
 # Async Elasticsearch implementation

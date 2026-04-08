@@ -636,6 +636,37 @@ def test_auto_finalize_rejects_meta_reference() -> None:
     assert len(repl_steps) >= 2
 
 
+def test_auto_finalize_reject_limit_breaks_loop() -> None:
+    """Regression: when all responses match a reject pattern, the loop must
+    terminate after auto_finalize_reject_limit attempts instead of running
+    until max_steps is exhausted.
+    """
+    reject_answer = (
+        'final_answer = "Siguientes pasos: extraer datos de todos los documentos '
+        "restantes. Esto requiere más iteraciones porque solo se ha procesado una "
+        'entidad hasta ahora."'
+    )
+    adapter = FakeAdapter(script=[reject_answer] * 5)
+
+    context = Context.from_text("test context")
+    runtime = RLM(
+        adapter=adapter,
+        auto_finalize_var="final_answer",
+        auto_finalize_min_length=10,
+        auto_finalize_reject_patterns=[r"(?i)siguientes?\s+pasos?"],
+        auto_finalize_reject_limit=3,
+    )
+    output, trace = runtime.run("test query", context)
+
+    # Must terminate without exhausting all 5 adapter responses
+    repl_steps = [s for s in trace.steps if s.kind == "repl_exec"]
+    assert len(repl_steps) == 3, f"Expected 3 REPL execs, got {len(repl_steps)}"
+    # After abort, the salvaged auto_finalize_var value is returned (partial data
+    # beats empty output), so the rejected content IS present in the output.
+    assert "Siguientes pasos" in output
+    assert output.strip() != ""
+
+
 def test_auto_finalize_reject_patterns_none_allows_anything() -> None:
     """Default: no reject patterns → any string accepted."""
     adapter = FakeAdapter(
