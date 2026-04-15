@@ -312,7 +312,8 @@ def build_root_user_message(
 
     # Iteration-0 safeguard: mirrors original alexzhang13/rlm's approach of
     # telling the model it hasn't seen the context yet so it doesn't skip
-    # straight to a final answer before exploring the REPL.
+    # straight to a final answer before exploring. Kept context-agnostic so
+    # it works for self-contained queries (no context) too.
     if step == 1 and not repl_executed:
         if retriever_available and context_len == 0:
             safeguard = (
@@ -325,9 +326,9 @@ def build_root_user_message(
             )
         else:
             safeguard = (
-                "You have not interacted with the REPL environment yet. "
-                "Start by exploring the context (use peek(), ctx.num_documents(), etc.) "
-                "and figure out how to answer the query — do not provide a final answer yet.\n\n"
+                "You have not interacted with the REPL environment or seen your "
+                "context yet. Your next action should be to look through and figure "
+                "out how to answer the query — don't just provide a final answer yet.\n\n"
             )
     else:
         safeguard = ""
@@ -351,21 +352,40 @@ def build_iteration_message(
     last_state_summary: str | None,
     step: int,
     max_steps: int,
+    root_query: str | None = None,
 ) -> str:
     """Build a lightweight user message for subsequent RLM iterations.
 
-    In conversation_history mode, the query and context metadata are already
-    present in the initial user message (messages[1]).  Subsequent iteration
-    messages only carry the REPL execution results and the step counter to
-    avoid duplicating the query and context metadata on every turn.
+    In conversation_history mode, the context metadata is already present in
+    the initial user message (messages[1]) and the prior REPL interactions
+    live in the conversation turns.  Subsequent iteration messages carry:
+
+      * the latest REPL execution result (stdout/error/state)
+      * a re-injection of the original query (anti-drift in long loops —
+        mirrors alexzhang13/rlm's USER_PROMPT_WITH_ROOT pattern)
+      * the step counter
+
+    Pass ``root_query`` to enable the anti-drift re-injection.  Leaving it
+    as ``None`` preserves the original terse format (used by older callers
+    and tests that don't track the root query).
     """
     stdout = _truncate_feedback(last_stdout, 1800)
     error = _truncate_feedback(last_error, 1200)
     state_summary = _truncate_feedback(last_state_summary, 1800)
-    return (
-        f"[REPL Result]\nstdout:\n{stdout}\n\nerror:\n{error}\n\n"
-        f"state:\n{state_summary}\n\nStep: {step}/{max_steps}"
+
+    repl_block = (
+        f"[REPL Result]\nstdout:\n{stdout}\n\nerror:\n{error}\n\nstate:\n{state_summary}"
     )
+
+    if root_query:
+        return (
+            f"{repl_block}\n\n"
+            f'The history above is your previous interactions with the REPL environment. '
+            f"Continue using the REPL and sub-LLMs to answer the original query:\n"
+            f'"{root_query}"\n\n'
+            f"Step: {step}/{max_steps}. Your next action:"
+        )
+    return f"{repl_block}\n\nStep: {step}/{max_steps}"
 
 
 def _truncate_feedback(value: str | None, limit: int) -> str:
