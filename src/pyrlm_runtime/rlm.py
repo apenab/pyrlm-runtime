@@ -274,6 +274,7 @@ class RLM:
     # Truncation limits for debug log messages (chars).
     log_truncate_code: int = 2000
     log_truncate_output: int = 1000
+    log_truncate_prompt_summary: int = 2000
 
     def _create_repl(self) -> REPLProtocol:
         if self.repl_backend == "python":
@@ -446,7 +447,7 @@ class RLM:
                         step_id=next_step_id(),
                         kind="subcall",
                         depth=depth,
-                        prompt_summary=_truncate(text, 240),
+                        prompt_summary=_truncate(text, self.log_truncate_prompt_summary),
                         output=_truncate(cached.text, self.log_truncate_output),
                         usage=cached.usage,
                         elapsed=time.perf_counter() - subcall_started,
@@ -476,6 +477,7 @@ class RLM:
                         conversation_history=self.conversation_history,
                         max_history_tokens=self.max_history_tokens,
                         log_truncate_code=self.log_truncate_code,
+                        log_truncate_prompt_summary=self.log_truncate_prompt_summary,
                     )
                 except Exception:
                     if reserved_tokens > 0:
@@ -504,7 +506,7 @@ class RLM:
                         step_id=next_step_id(),
                         kind="recursive_subcall",
                         depth=depth,
-                        prompt_summary=_truncate(text, 240),
+                        prompt_summary=_truncate(text, self.log_truncate_prompt_summary),
                         output=_truncate(result_text, self.log_truncate_output),
                         usage=aggregated_usage,
                         elapsed=time.perf_counter() - subcall_started,
@@ -536,6 +538,7 @@ class RLM:
                         stdout=sub_step.stdout,
                         error=sub_step.error,
                         usage=sub_step.usage,
+                        model=sub_step.model,
                         elapsed=sub_step.elapsed,
                         cache_hit=sub_step.cache_hit,
                         input_hash=sub_step.input_hash,
@@ -573,9 +576,10 @@ class RLM:
                     step_id=next_step_id(),
                     kind="subcall",
                     depth=depth,
-                    prompt_summary=_truncate(text, 240),
+                    prompt_summary=_truncate(text, self.log_truncate_prompt_summary),
                     output=_truncate(response.text, self.log_truncate_code),
                     usage=response.usage,
+                    model=response.model_id,
                     elapsed=time.perf_counter() - subcall_started,
                     cache_hit=False,
                     input_hash=input_hash,
@@ -1741,6 +1745,7 @@ class RLM:
                                     code=_truncate(summary_resp.text, self.log_truncate_code),
                                     output=summary_resp.text,
                                     usage=summary_resp.usage,
+                                    model=summary_resp.model_id,
                                     elapsed=time.perf_counter() - summary_started,
                                 )
                             )
@@ -1760,6 +1765,7 @@ class RLM:
                         last_state_summary=last_state_summary,
                         step=policy.steps,
                         max_steps=policy.max_steps,
+                        root_query=query,
                     )
                     history.append({"role": "user", "content": iter_msg})
                 # Trim history if a token budget is configured
@@ -1836,10 +1842,11 @@ class RLM:
                         step_id=next_step_id(),
                         kind="root_call",
                         depth=0,
-                        prompt_summary=_truncate(prompt_summary, 240),
+                        prompt_summary=_truncate(prompt_summary, self.log_truncate_prompt_summary),
                         code=_truncate(response.text, self.log_truncate_code),
                         output=response.text,
                         usage=response.usage,
+                        model=response.model_id,
                         elapsed=root_elapsed,
                     )
                 )
@@ -1936,10 +1943,11 @@ class RLM:
                     step_id=next_step_id(),
                     kind="root_call",
                     depth=0,
-                    prompt_summary=_truncate(prompt_summary, 240),
+                    prompt_summary=_truncate(prompt_summary, self.log_truncate_prompt_summary),
                     code=_truncate(response.text, self.log_truncate_code),
                     output=response.text,
                     usage=response.usage,
+                    model=response.model_id,
                     elapsed=root_elapsed,
                 )
             )
@@ -2510,6 +2518,7 @@ def _run_recursive_subcall(
     conversation_history: bool = True,
     max_history_tokens: int = 0,
     log_truncate_code: int = 2000,
+    log_truncate_prompt_summary: int = 2000,
 ) -> tuple[str, Trace]:
     """Run a mini-RLM loop for a recursive subcall.
 
@@ -2560,9 +2569,10 @@ def _run_recursive_subcall(
                 step_id=next_step_id(),
                 kind="subcall",
                 depth=depth + 1,
-                prompt_summary=_truncate(query_text, 240),
+                prompt_summary=_truncate(query_text, log_truncate_prompt_summary),
                 output=_truncate(response.text, log_truncate_code),
                 usage=response.usage,
+                model=response.model_id,
                 elapsed=time.perf_counter() - subcall_started,
                 cache_hit=False,
                 input_hash=_hash_text(query_text),
@@ -2615,6 +2625,7 @@ def _run_recursive_subcall(
                     last_state_summary=last_state_summary,
                     step=step + 1,
                     max_steps=max_steps,
+                    root_query=query,
                 )
                 sub_history.append({"role": "user", "content": iter_msg})
             if max_history_tokens > 0:
@@ -2649,10 +2660,11 @@ def _run_recursive_subcall(
                 step_id=next_step_id(),
                 kind="root_call",
                 depth=depth,
-                prompt_summary=_truncate(prompt_summary, 240),
+                prompt_summary=_truncate(prompt_summary, log_truncate_prompt_summary),
                 code=_truncate(response.text, log_truncate_code),
                 output=response.text,
                 usage=response.usage,
+                model=response.model_id,
                 elapsed=root_elapsed,
             )
         )
