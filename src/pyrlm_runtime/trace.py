@@ -29,6 +29,7 @@ class TraceStep:
     stdout: str | None = None
     error: str | None = None
     usage: Usage | None = None
+    model: str | None = None
     elapsed: float | None = None
     cache_hit: bool = False
     input_hash: str | None = None
@@ -76,6 +77,7 @@ class Trace:
                     stdout=item.get("stdout"),
                     error=item.get("error"),
                     usage=usage,
+                    model=item.get("model"),
                     elapsed=item.get("elapsed"),
                     cache_hit=item.get("cache_hit", False),
                     input_hash=item.get("input_hash"),
