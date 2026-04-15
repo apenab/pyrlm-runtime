@@ -5,8 +5,15 @@ import sys
 from pathlib import Path
 
 import pytest
-from pyrlm_runtime.adapters.base import Usage
-from pyrlm_runtime.trace import Trace, TraceStep
+
+# The trace viewer is an optional feature gated behind the `tui` extra.
+# Skip the entire module when textual/rich aren't installed so CI doesn't
+# need to pull the optional deps just to run the rest of the suite.
+pytest.importorskip("textual")
+pytest.importorskip("rich")
+
+from pyrlm_runtime.adapters.base import Usage  # noqa: E402
+from pyrlm_runtime.trace import Trace, TraceStep  # noqa: E402
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
