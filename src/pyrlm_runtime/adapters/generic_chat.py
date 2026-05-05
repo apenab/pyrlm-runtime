@@ -13,7 +13,7 @@ from .base import ModelAdapter, ModelResponse, Usage, estimate_usage
 
 logger = logging.getLogger(__name__)
 
-PayloadBuilder = Callable[[list[dict[str, str]], int, float, str | None], dict[str, Any]]
+PayloadBuilder = Callable[[list[dict[str, str]], int, "float | None", str | None], dict[str, Any]]
 ResponseParser = Callable[[dict[str, Any]], tuple[str, Usage | None]]
 
 
@@ -106,14 +106,15 @@ def _extract_response_meta(data: dict[str, Any]) -> dict[str, Any]:
 def default_payload_builder(
     messages: list[dict[str, str]],
     max_tokens: int,
-    temperature: float,
+    temperature: float | None,
     model: str | None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "messages": messages,
         "max_tokens": max_tokens,
-        "temperature": temperature,
     }
+    if temperature is not None:
+        payload["temperature"] = temperature
     if model:
         payload["model"] = model
     return payload
@@ -282,7 +283,7 @@ class GenericChatAdapter(ModelAdapter):
         messages: list[dict[str, str]],
         *,
         max_tokens: int = 512,
-        temperature: float = 0.0,
+        temperature: float | None = 0.0,
     ) -> ModelResponse:
         payload = self.payload_builder(messages, max_tokens, temperature, self.model)
         last_error: Exception | None = None
