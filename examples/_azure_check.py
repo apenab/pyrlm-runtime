@@ -6,6 +6,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 def _load_from_zshrc() -> None:
@@ -28,14 +29,19 @@ def _load_from_zshrc() -> None:
         pass
 
 
-def check_azure_connection(model: str, api_version: str | None = None) -> None:
-    """Verify Azure env vars are set and the model responds.
+def check_azure_connection(
+    model: str,
+    api_version: str | None = None,
+    extra_models: list[str] | None = None,
+) -> None:
+    """Verify Azure env vars are set and every model responds.
 
     Resolution order for env vars:
       1. Current process environment (already set in shell)
       2. ~/.zshrc export statements (fallback for uv run / non-login shells)
 
-    Exits with a clear error message if the check fails.
+    Pass ``extra_models`` to check additional models (e.g. the subcall model)
+    after the primary model.  Exits with a clear error message if any check fails.
     """
     # --- 1. Load missing vars from ~/.zshrc ---
     _load_from_zshrc()
@@ -75,11 +81,11 @@ def check_azure_connection(model: str, api_version: str | None = None) -> None:
     print(f"  env endpoint : {endpoint_env}")
     print(f"  resolved URL : {adapter.endpoint}")
     print(f"  api key      : {key_preview}")
-    print(f"  model        : {model}")
 
-    # Pre-resolve hostname to catch DNS issues early
+    all_models = [model] + (extra_models or [])
+
+    # Pre-resolve hostname once (shared across all models)
     import socket
-    from urllib.parse import urlparse
 
     try:
         hostname = urlparse(adapter.endpoint).hostname
@@ -92,27 +98,37 @@ def check_azure_connection(model: str, api_version: str | None = None) -> None:
         print(f"  hostname DNS : FAILED ({e})")
         sys.exit(1)
 
-    print(f"Checking connection ...", end=" ", flush=True)
+    # --- 4. Minimal API call per model ---
+    import httpx
 
-    # --- 4. Minimal API call ---
-    try:
-        import httpx
-        resp = adapter.complete(
-            [{"role": "user", "content": "Reply with the single word: ok"}],
-            max_tokens=100,  # GPT-5.1 needs headroom before emitting content
-            temperature=0.0,
-        )
-        adapter.close()
-        answer = (resp.text or "").strip().lower()
-        if not answer:
-            print("FAILED (empty response — model returned no content)")
+    for m in all_models:
+        print(f"  model        : {m}")
+        try:
+            m_adapter = AzureOpenAIAdapter(model=m, timeout=30.0)
+        except EnvironmentError as exc:
+            print(f"ERROR: {exc}")
             sys.exit(1)
-        print(f"OK  ✓  (response: {answer!r})\n")
-    except httpx.HTTPStatusError as exc:
-        print(f"FAILED")
-        print(f"  HTTP {exc.response.status_code}: {exc.response.text[:300]}")
-        sys.exit(1)
-    except Exception as exc:
-        print(f"FAILED")
-        print(f"  {type(exc).__name__}: {exc}")
-        sys.exit(1)
+
+        print(f"Checking connection for {m!r} ...", end=" ", flush=True)
+        try:
+            resp = m_adapter.complete(
+                [{"role": "user", "content": "Reply with the single word: ok"}],
+                max_tokens=100,
+                temperature=0.0,
+            )
+            m_adapter.close()
+            answer = (resp.text or "").strip().lower()
+            if not answer:
+                print("FAILED (empty response — model returned no content)")
+                sys.exit(1)
+            print(f"OK  ✓  (response: {answer!r})")
+        except httpx.HTTPStatusError as exc:
+            print("FAILED")
+            print(f"  HTTP {exc.response.status_code}: {exc.response.text[:300]}")
+            sys.exit(1)
+        except Exception as exc:
+            print("FAILED")
+            print(f"  {type(exc).__name__}: {exc}")
+            sys.exit(1)
+
+    print()
