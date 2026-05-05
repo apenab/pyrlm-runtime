@@ -39,6 +39,10 @@ dependencies = [
 rich = ["rich>=13.7"]
 examples = ["datasets>=4.7.0"]
 elasticsearch = ["elasticsearch[async]>=8.0"]
+tui = [
+    "textual>=8.2.3",
+    "rich>=13.7",
+]
 
 [project.urls]
 Homepage = "https://github.com/apenab/rlm-runtime"
