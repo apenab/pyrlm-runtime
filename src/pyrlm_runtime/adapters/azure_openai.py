@@ -16,30 +16,33 @@ logger = logging.getLogger(__name__)
 def _azure_payload_builder(
     messages: list[dict[str, str]],
     max_tokens: int,
-    temperature: float,
+    temperature: float | None,
     model: str | None,
 ) -> dict[str, object]:
     """Classic deployment-URL style: model is in the URL, not the body."""
     del model
-    return {
+    payload: dict[str, object] = {
         "messages": messages,
-        "temperature": temperature,
         "max_completion_tokens": max_tokens,
     }
+    if temperature is not None:
+        payload["temperature"] = temperature
+    return payload
 
 
 def _azure_v1_payload_builder(
     messages: list[dict[str, str]],
     max_tokens: int,
-    temperature: float,
+    temperature: float | None,
     model: str | None,
 ) -> dict[str, object]:
     """OpenAI v1-compat style: model goes in the request body."""
     payload: dict[str, object] = {
         "messages": messages,
-        "temperature": temperature,
         "max_completion_tokens": max_tokens,
     }
+    if temperature is not None:
+        payload["temperature"] = temperature
     if model:
         payload["model"] = model
     return payload
@@ -123,18 +126,21 @@ class AzureOpenAIAdapter(ModelAdapter):
             payload_builder=payload_builder,
             timeout=timeout,
         )
-        # Set to True after detecting that this model rejects custom temperature.
+        # Populated on first detection of a temperature-related 400.
         # Avoids a wasted round-trip on every subsequent call.
+        # None  → omit the field entirely (unsupported_parameter)
+        # float → send that fixed value (unsupported_value, e.g. 1.0)
         self._temperature_unsupported = False
+        self._temperature_fallback: float | None = 1.0
 
     def complete(
         self,
         messages: list[dict[str, str]],
         *,
         max_tokens: int = 512,
-        temperature: float = 0.0,
+        temperature: float | None = 0.0,
     ) -> ModelResponse:
-        effective_temp = 1.0 if self._temperature_unsupported else temperature
+        effective_temp = self._temperature_fallback if self._temperature_unsupported else temperature
         try:
             return self._adapter.complete(
                 messages, max_tokens=max_tokens, temperature=effective_temp
@@ -149,21 +155,29 @@ class AzureOpenAIAdapter(ModelAdapter):
                 msg = err.get("message", "")
             except Exception:
                 raise exc
-            # Some reasoning models (e.g. gpt-5.x) reject any temperature other
-            # than the API default (1.0).  Detect, log, and retry once.
-            if code in ("unsupported_parameter", "unsupported_value") and (
-                param == "temperature" or "temperature" in msg
-            ):
-                logger.info(
-                    "Model %s does not support temperature=%s; retrying with temperature=1.0",
-                    self.model,
-                    effective_temp,
-                )
-                self._temperature_unsupported = True
-                return self._adapter.complete(
-                    messages, max_tokens=max_tokens, temperature=1.0
-                )
-            raise
+            is_temperature_error = param == "temperature" or "temperature" in msg
+            if not is_temperature_error:
+                raise
+            if code == "unsupported_parameter":
+                # Model does not accept the temperature field at all — omit it.
+                fallback: float | None = None
+            elif code == "unsupported_value":
+                # Model accepts temperature but only the default (1.0).
+                fallback = 1.0
+            else:
+                raise
+            logger.info(
+                "Model %s rejected temperature=%s (code=%s); retrying with temperature=%s",
+                self.model,
+                effective_temp,
+                code,
+                fallback,
+            )
+            self._temperature_unsupported = True
+            self._temperature_fallback = fallback
+            return self._adapter.complete(
+                messages, max_tokens=max_tokens, temperature=fallback
+            )
 
     def close(self) -> None:
         self._adapter.close()
