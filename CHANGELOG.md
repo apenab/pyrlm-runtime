@@ -1,3 +1,19 @@
+## v0.4.1 (2026-05-05)
+
+### Feat
+
+- **examples**: add demo for counting 'r' in generated fruit names and interactive trace viewer
+- **trace-viewer**: add interactive TUI for visualizing execution traces
+
+### Fix
+
+- **azure-openai, generic-chat**: update temperature parameter to be optional and improve payload handling
+- **azure-openai**: enhance check_azure_connection to support multiple models and improve error handling
+- **azure-openai**: handle unsupported temperature parameter and retry with default value
+- **tests**: skip trace viewer tests if optional dependencies are not installed
+- **rlm**: enhance prompt summary truncation and add root query support
+- **ci**: push tag explicitly in release workflow
+
 ## v0.4.0 (2026-04-08)
 
 ### Feat
