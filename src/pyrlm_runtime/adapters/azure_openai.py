@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
 from urllib.parse import urlparse
 
+import httpx
+
 from .base import ModelAdapter, ModelResponse
 from .generic_chat import GenericChatAdapter
+
+logger = logging.getLogger(__name__)
 
 
 def _azure_payload_builder(
@@ -118,6 +123,9 @@ class AzureOpenAIAdapter(ModelAdapter):
             payload_builder=payload_builder,
             timeout=timeout,
         )
+        # Set to True after detecting that this model rejects custom temperature.
+        # Avoids a wasted round-trip on every subsequent call.
+        self._temperature_unsupported = False
 
     def complete(
         self,
@@ -126,7 +134,36 @@ class AzureOpenAIAdapter(ModelAdapter):
         max_tokens: int = 512,
         temperature: float = 0.0,
     ) -> ModelResponse:
-        return self._adapter.complete(messages, max_tokens=max_tokens, temperature=temperature)
+        effective_temp = 1.0 if self._temperature_unsupported else temperature
+        try:
+            return self._adapter.complete(
+                messages, max_tokens=max_tokens, temperature=effective_temp
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 400:
+                raise
+            try:
+                err = exc.response.json().get("error", {})
+                code = err.get("code", "")
+                param = err.get("param", "")
+                msg = err.get("message", "")
+            except Exception:
+                raise exc
+            # Some reasoning models (e.g. gpt-5.x) reject any temperature other
+            # than the API default (1.0).  Detect, log, and retry once.
+            if code in ("unsupported_parameter", "unsupported_value") and (
+                param == "temperature" or "temperature" in msg
+            ):
+                logger.info(
+                    "Model %s does not support temperature=%s; retrying with temperature=1.0",
+                    self.model,
+                    effective_temp,
+                )
+                self._temperature_unsupported = True
+                return self._adapter.complete(
+                    messages, max_tokens=max_tokens, temperature=1.0
+                )
+            raise
 
     def close(self) -> None:
         self._adapter.close()
