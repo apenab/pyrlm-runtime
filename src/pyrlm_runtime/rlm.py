@@ -776,8 +776,14 @@ class RLM:
             if not stripped.startswith("```"):
                 return stripped
             lines = stripped.splitlines()
-            if len(lines) >= 2 and lines[0].startswith("```") and lines[-1].strip() == "```":
-                return "\n".join(lines[1:-1]).strip()
+            if len(lines) < 2:
+                return stripped
+            # Find first closing fence — handles trailing text after the block.
+            close_idx = next(
+                (i for i in range(1, len(lines)) if lines[i].strip() == "```"), None
+            )
+            if close_idx is not None:
+                return "\n".join(lines[1:close_idx]).strip()
             return stripped
 
         def _parse_jsonish_response(text: str) -> Any:
@@ -2313,9 +2319,14 @@ def _extract_code(text: str) -> str:
     if stripped.startswith("```"):
         lines = stripped.splitlines()
         if lines:
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
+            lines = lines[1:]  # drop opening fence (```python / ```)
+        # Stop at the FIRST closing fence — ignore any subsequent blocks.
+        # Taking up to the last ``` causes SyntaxErrors when the model emits
+        # two consecutive code blocks in one response.
+        close_idx = next(
+            (i for i, l in enumerate(lines) if l.strip() == "```"), len(lines)
+        )
+        lines = lines[:close_idx]
         if lines and lines[0].strip().lower() in {"python", "repl"}:
             lines = lines[1:]
         return "\n".join(lines).strip()
