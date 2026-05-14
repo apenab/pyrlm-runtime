@@ -27,6 +27,14 @@ from .policy import (
     Policy,
     PolicyError,
 )
+from .multiquery import QueryRewriter, union_pool
+from .rerank import (
+    ListwiseReranker,
+    RerankerProtocol,
+    TournamentReranker,
+    ndcg_at_k,
+    recall_at_k,
+)
 from .retrieval import (
     AsyncElasticsearchRetriever,
     AsyncRetrieverProtocol,
@@ -60,6 +68,13 @@ __all__ = [
     "AsyncRetrieverProtocol",
     "ElasticsearchRetriever",
     "RetrieverProtocol",
+    "QueryRewriter",
+    "union_pool",
+    "ListwiseReranker",
+    "TournamentReranker",
+    "RerankerProtocol",
+    "ndcg_at_k",
+    "recall_at_k",
     "PythonREPL",
     "ExecResult",
     "Policy",

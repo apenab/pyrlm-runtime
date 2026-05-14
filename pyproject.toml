@@ -37,7 +37,7 @@ dependencies = [
 
 [project.optional-dependencies]
 rich = ["rich>=13.7"]
-examples = ["datasets>=4.7.0"]
+examples = ["datasets>=4.7.0", "rank-bm25>=0.2.2"]
 elasticsearch = ["elasticsearch[async]>=8.0"]
 tui = [
     "textual>=8.2.3",
