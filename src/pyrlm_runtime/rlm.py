@@ -2324,7 +2324,7 @@ def _extract_code(text: str) -> str:
         # Taking up to the last ``` causes SyntaxErrors when the model emits
         # two consecutive code blocks in one response.
         close_idx = next(
-            (i for i, l in enumerate(lines) if l.strip() == "```"), len(lines)
+            (i for i, line in enumerate(lines) if line.strip() == "```"), len(lines)
         )
         lines = lines[:close_idx]
         if lines and lines[0].strip().lower() in {"python", "repl"}:
