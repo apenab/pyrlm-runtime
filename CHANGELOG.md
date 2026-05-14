@@ -1,3 +1,9 @@
+## v0.4.2 (2026-05-14)
+
+### Fix
+
+- **rlm**: improve code block extraction logic to handle trailing text and multiple fences (#31)
+
 ## v0.4.1 (2026-05-05)
 
 ### Feat
