@@ -148,13 +148,13 @@ class OracleRetriever:
         self._qrels = qrels
         self._excluded = {q: set(ids) for q, ids in excluded_ids.items()}
         self._corpus_ids = list(corpus.keys())
-        self._rng = random.Random(seed)
+        self._seed = seed
 
     def search(self, query_id: str, top_n: int) -> list[dict[str, Any]]:
         gold = [c for c, s in self._qrels.get(query_id, {}).items() if s > 0]
         excluded = self._excluded.get(query_id, set())
         positives = [c for c in gold if c in self._corpus]
-        rng = random.Random(hash(query_id) & 0xFFFFFFFF)
+        rng = random.Random(f"{self._seed}:{query_id}")
         pool: list[str] = []
         seen: set[str] = set()
         for c in positives:

@@ -176,8 +176,7 @@ class QueryRewriter:
             if record is not None:
                 with self._lock:
                     self._cache_hits += 1
-                text: str = record.response if hasattr(record, "response") else str(record)
-                return _parse_rewrites(text, self._n)
+                return _parse_rewrites(record.text, self._n)
 
         messages = [
             {"role": "system", "content": self._system_prompt},
@@ -194,7 +193,7 @@ class QueryRewriter:
             try:
                 from .cache import CacheRecord
 
-                self._cache.set(cache_key, CacheRecord(response=text))
+                self._cache.set(cache_key, CacheRecord(text=text, usage=response.usage))
             except Exception:
                 pass
 

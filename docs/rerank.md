@@ -66,10 +66,13 @@ reranker = ListwiseReranker(
 
 For one query with pool size `N`, window size `W`, step `S`:
 
-```
-windows_per_query = ceil((N - W) / S) + 1
+```text
+windows_per_query = 1 if N <= W else ceil((N - W) / S) + 1
 LLM_calls_per_query ≈ windows_per_query
 ```
+
+Any non-empty pool smaller than or equal to the window (`N <= W`) still
+requires exactly one LLM call.
 
 | `top_n` | `window` | `step` | LLM calls / query |
 |--------:|---------:|-------:|------------------:|

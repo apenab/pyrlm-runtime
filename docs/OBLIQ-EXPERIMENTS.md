@@ -208,7 +208,7 @@ distintos.
 Función expuesta en el REPL. Recibe la query y una lista de `doc_ids`.
 Para cada doc, lanza un subcall con prompt:
 
-```
+```text
 Query: {query}
 
 Passage: {doc_content}

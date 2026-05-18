@@ -515,7 +515,7 @@ with the query — a single BM25 pass misses most of the relevant corpus. The
 multi-query pattern expands coverage by reformulating the query N times with diverse
 vocabulary before retrieval, then merging and reranking the union.
 
-```
+```text
 query → LLM rewriter (1 call) → N reformulations + original
                                        ↓
                               BM25 × (N+1) searches

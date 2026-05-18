@@ -132,7 +132,7 @@ Si el gold-en-pool no sube, el rewriter no está generando diversidad
 
 ### 4.0 Diagrama de arquitectura
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │  Query oblicua del usuario                                  │
 │  "Find problems requiring extremal argument with pigeonhole"│
@@ -231,7 +231,7 @@ palabra exacta del título.
 
 ### 4.1 Pipeline
 
-```
+```text
 1. Query oblicua original
    "find problems requiring extremal argument with pigeonhole reasoning"
             ↓

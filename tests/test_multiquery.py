@@ -113,6 +113,38 @@ def test_rewriter_n_property():
     assert rw.n == 7
 
 
+def test_rewriter_cache_hit_returns_rewrites():
+    """Regression: cache read used record.response (missing field) and write used
+    CacheRecord(response=...) (wrong kwarg) — both silently failed, so the cache
+    was effectively inert.  Verify that a second call with the same query is served
+    from cache (calls counter stays at 1) and returns the correct rewrites."""
+    from pyrlm_runtime.cache import CacheRecord
+
+    class _InMemoryCache:
+        def __init__(self) -> None:
+            self._store: dict = {}
+
+        def get(self, key: str) -> CacheRecord | None:
+            return self._store.get(key)
+
+        def set(self, key: str, record: CacheRecord) -> None:
+            self._store[key] = record
+
+    cache = _InMemoryCache()
+    adapter = FakeAdapter(script=['{"rewrites": ["foo", "bar", "baz"]}'] * 5)
+    rw = QueryRewriter(adapter, n=3, system_prompt=SYSTEM_PROMPT, cache=cache)
+
+    result1 = rw.rewrite("my query")
+    assert result1 == ["foo", "bar", "baz"]
+    assert rw.calls == 1
+    assert rw.cache_hits == 0
+
+    result2 = rw.rewrite("my query")
+    assert result2 == ["foo", "bar", "baz"]
+    assert rw.calls == 1  # no new LLM call
+    assert rw.cache_hits == 1
+
+
 def test_rewriter_thread_safety():
     import threading
 

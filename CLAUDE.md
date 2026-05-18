@@ -16,7 +16,7 @@ Minimal runtime for Recursive Language Models (RLMs). Python 3.12+, MIT license.
 
 ## Project structure
 
-```
+```text
 src/pyrlm_runtime/
   rlm.py          # Core RLM loop (run, subcalls, recursive subcalls)
   env.py          # PythonREPL (exec-based sandbox), REPLProtocol, ExecResult

@@ -131,7 +131,7 @@ def build_rlm_rerank_extensions(
                 )
             raw_results = llm_batch(prompts, max_tokens=subcall_max_tokens)
             out: list[dict[str, Any]] = []
-            for doc_id, raw in zip(doc_ids, raw_results, strict=False):
+            for doc_id, raw in zip(doc_ids, raw_results, strict=True):
                 score, reason = _parse_verify_response(str(raw))
                 out.append(
                     {
