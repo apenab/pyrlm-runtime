@@ -259,7 +259,7 @@ print(top10_ids)
     en lugar de sumar atribuciones racy por-query (los runs con `--workers
     > 1` previos sobre-cuentan ~3-4× las llamadas LLM en el summary; la
     factura real es la del contador interno).
-- ✅ `docs/rerank.md` — documentación de la primitiva
+- ✅ `docs/obliq-bench/rerank.md` — documentación de la primitiva
 - ✅ `examples/_rlm_rerank_tools.py` — `verify_relevance_batch`,
   `read_doc`, prompt del sistema y wiring via `repl_extensions`
 - ✅ `examples/oblique_rlm_bench.py` — bench con `--smoke`, `--retriever

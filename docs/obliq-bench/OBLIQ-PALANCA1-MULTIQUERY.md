@@ -218,7 +218,7 @@ palabra exacta del título.
    el `ListwiseReranker` existente, añadimos una función `Rewriter`
    mínima (~30 líneas), BM25 ya estaba. Cumple el principio
    "missing primitive that cannot be composed" de
-   [CLAUDE.md](../CLAUDE.md).
+   [CLAUDE.md](../../CLAUDE.md).
 2. **El intent del usuario nunca se reemplaza.** El rewriter solo
    expande el retrieval. Cuando el reranker juzga, ve la **query
    original**, no las reformulaciones — las reformulaciones eran un

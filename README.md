@@ -1,6 +1,6 @@
 # pyrlm-runtime
 
-Minimal Python runtime for **Recursive Language Models (RLMs)** — inspired by the [MIT CSAIL paper](docs/rlm-paper-mit.pdf) _"Recursive Language Models"_.
+Minimal Python runtime for **Recursive Language Models (RLMs)** — inspired by the [MIT CSAIL paper](https://arxiv.org/abs/2512.24601) _"Recursive Language Models"_.
 
 RLMs solve the long-context problem: instead of sending huge contexts directly to an LLM (which truncates or degrades), the context lives as **environment state** in a Python REPL. The LLM writes code to inspect, search, and chunk the data, making **recursive subcalls** to smaller models when needed. Result: handle arbitrarily large contexts with constant token usage per step.
 
@@ -598,7 +598,7 @@ top_10 = reranker.rerank(query, union, top_k=10)
 | **`QueryRewriter` (5 rewrites + original) + `ListwiseReranker`** | **0.093** | **3.3×** |
 
 No index changes. No fine-tuning. Purely read-path composition.
-See [`docs/OBLIQ-PALANCA1-MULTIQUERY.md`](docs/OBLIQ-PALANCA1-MULTIQUERY.md) for full
+See [`docs/obliq-bench/OBLIQ-PALANCA1-MULTIQUERY.md`](docs/obliq-bench/OBLIQ-PALANCA1-MULTIQUERY.md) for full
 experimental details and [`examples/oblique_multiquery_bench.py`](examples/oblique_multiquery_bench.py)
 to reproduce.
 
@@ -947,7 +947,7 @@ uv run ruff format src/ tests/
 
 ## References
 
-- [MIT CSAIL Paper: Recursive Language Models](docs/rlm-paper-mit.pdf) — Zhou, et al.
+- [MIT CSAIL Paper: Recursive Language Models](https://arxiv.org/abs/2512.24601) — Zhou, et al.
 - This implementation is not affiliated with MIT.
 
 ## License

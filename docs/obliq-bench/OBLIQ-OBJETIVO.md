@@ -178,7 +178,7 @@ Lee según lo que busques:
 | Diseño detallado de la Palanca 1 (rewriter+rerank) | [`OBLIQ-PALANCA1-MULTIQUERY.md`](OBLIQ-PALANCA1-MULTIQUERY.md) |
 | Cómo re-correr todo con cache OFF (publicación) | [`OBLIQ-DOUBLECHECK-ROADMAP.md`](OBLIQ-DOUBLECHECK-ROADMAP.md) |
 | La primitiva `ListwiseReranker` (API y uso) | [`rerank.md`](rerank.md) |
-| Convenciones del repo (cómo añadir cosas a la librería) | [`../CLAUDE.md`](../CLAUDE.md) |
+| Convenciones del repo (cómo añadir cosas a la librería) | [`../CLAUDE.md`](../../CLAUDE.md) |
 
 ---
 
