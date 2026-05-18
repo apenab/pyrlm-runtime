@@ -7,7 +7,7 @@
 
 Paper: _OBLIQ-Bench: Exposing Overlooked Bottlenecks in Modern Retrievers with Latent and Implicit Queries_  
 Autores: Diane Tchuindjo, Devavrat Shah, Omar Khattab — MIT  
-ArXiv: 2605.06235v1
+ArXiv: [2605.06235v1](https://arxiv.org/html/2605.06235)
 
 ---
 

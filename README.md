@@ -588,13 +588,13 @@ top_10 = reranker.rerank(query, union, top_k=10)
 > vocabulary-distant corners of the corpus. The original query guarantees you don't
 > lose documents that BM25 already found — a critical anchor against regressions.
 
-#### Measured results (OBLIQ-Bench Math, N=151)
+#### Measured results ([OBLIQ-Bench](https://arxiv.org/html/2605.06235) Math, N=151)
 
-| System | NDCG@10 | vs BM25 |
-|---|---:|---:|
-| BM25 baseline | 0.028 | 1× |
-| BM25 + `ListwiseReranker` | 0.057 | 2.0× |
-| `QueryRewriter` (5 rewrites) + `ListwiseReranker` | 0.072 | 2.6× |
+| System                                                           |   NDCG@10 |  vs BM25 |
+| ---------------------------------------------------------------- | --------: | -------: |
+| BM25 baseline                                                    |     0.028 |       1× |
+| BM25 + `ListwiseReranker`                                        |     0.057 |     2.0× |
+| `QueryRewriter` (5 rewrites) + `ListwiseReranker`                |     0.072 |     2.6× |
 | **`QueryRewriter` (5 rewrites + original) + `ListwiseReranker`** | **0.093** | **3.3×** |
 
 No index changes. No fine-tuning. Purely read-path composition.
@@ -850,16 +850,16 @@ LLM_BASE_URL="http://localhost:11434/v1"  # Ollama
 
 ### Common configurations by use case
 
-| Use case                       | Configuration                                                     |
-| ------------------------------ | ----------------------------------------------------------------- |
-| Small context (<8K chars)      | Use `SmartRouter` — it will pick baseline automatically           |
+| Use case                       | Configuration                                                            |
+| ------------------------------ | ------------------------------------------------------------------------ |
+| Small context (<8K chars)      | Use `SmartRouter` — it will pick baseline automatically                  |
 | Large corpus (10K+ docs)       | `RLM(adapter, retriever=ElasticsearchRetriever(...))` — search on demand |
-| Large context (>100K chars)    | `RLM(adapter, conversation_history=True, parallel_subcalls=True)` |
-| Batch many independent prompts | Use `llm_batch(prompts)` — always parallel, no config needed      |
-| Cost-sensitive                 | Use a cheaper `subcall_adapter` for subcalls                      |
-| Safety-critical code execution | `repl_backend="monty"`                                            |
-| Deterministic extraction       | `SmartRouter` with `DETERMINISTIC_FIRST` profile                  |
-| Complex multi-hop reasoning    | `recursive_subcalls=True, max_recursion_depth=2`                  |
+| Large context (>100K chars)    | `RLM(adapter, conversation_history=True, parallel_subcalls=True)`        |
+| Batch many independent prompts | Use `llm_batch(prompts)` — always parallel, no config needed             |
+| Cost-sensitive                 | Use a cheaper `subcall_adapter` for subcalls                             |
+| Safety-critical code execution | `repl_backend="monty"`                                                   |
+| Deterministic extraction       | `SmartRouter` with `DETERMINISTIC_FIRST` profile                         |
+| Complex multi-hop reasoning    | `recursive_subcalls=True, max_recursion_depth=2`                         |
 
 ### Supported providers
 

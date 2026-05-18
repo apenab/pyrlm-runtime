@@ -1,11 +1,11 @@
 # Listwise LLM reranker
 
 `pyrlm_runtime.rerank` adds an LLM-based reranking stage that sits **after**
-any retriever in the runtime. It addresses the *retrieval–verification
-asymmetry* identified by OBLIQ-Bench (Tchuindjo et al. 2026,
-arXiv:2605.06235): reasoning LLMs can easily *recognise* relevance when shown
+any retriever in the runtime. It addresses the _retrieval–verification
+asymmetry_ identified by OBLIQ-Bench (Tchuindjo et al. 2026,
+[arXiv:2605.06235](https://arxiv.org/html/2605.06235)): reasoning LLMs can easily _recognise_ relevance when shown
 a query–document pair, even when first-stage retrievers (BM25, dense
-embeddings, hybrid) fail to *surface* the relevant documents.
+embeddings, hybrid) fail to _surface_ the relevant documents.
 
 ## API
 
@@ -20,8 +20,8 @@ from pyrlm_runtime import (
 
 ### `ListwiseReranker`
 
-Sliding-window listwise reranker (RankGPT-style; Sun et al. 2023, *Is ChatGPT
-Good at Search?*). Walks the candidate list bottom→top in overlapping
+Sliding-window listwise reranker (RankGPT-style; Sun et al. 2023, _Is ChatGPT
+Good at Search?_). Walks the candidate list bottom→top in overlapping
 windows of `window_size` with stride `step`, asking the LLM to permute each
 window's identifiers. The final order is the composition of window-level
 permutations.
@@ -75,11 +75,11 @@ Any non-empty pool smaller than or equal to the window (`N <= W`) still
 requires exactly one LLM call.
 
 | `top_n` | `window` | `step` | LLM calls / query |
-|--------:|---------:|-------:|------------------:|
-| 100     | 20       | 10     | 9                 |
-| 50      | 20       | 10     | 4                 |
-| 50      | 10       | 5      | 9                 |
-| 20      | 20       | 10     | 1                 |
+| ------: | -------: | -----: | ----------------: |
+|     100 |       20 |     10 |                 9 |
+|      50 |       20 |     10 |                 4 |
+|      50 |       10 |      5 |                 9 |
+|      20 |       20 |     10 |                 1 |
 
 ### Metrics
 
