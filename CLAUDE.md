@@ -61,6 +61,7 @@ When fixing a bug or correcting a behavior, always add a regression test that wo
 ## REPL backends
 
 Two interchangeable backends via `REPLProtocol`:
+
 - `"python"` (default): PythonREPL using `exec()` with whitelist sandbox
 - `"monty"`: MontyREPL using pydantic-monty (Rust interpreter, secure)
 
@@ -87,6 +88,35 @@ pyrlm-runtime provides primitives: RLM loop, REPL sandbox, Context, retrieval, d
 ### Be conservative with retrieval.py and doctools/
 
 These are the most used integration points. Before modifying:
+
 1. Check whether the gap can be solved with existing filter DSL or function composition
 2. If a new function is needed, ensure it follows the existing naming and return-value conventions
 3. Add tests that use `FakeAdapter` to verify the new behavior without hitting real ES or PDFs
+
+## Empirical research methodology
+
+This applies when the user proposes **measuring, benchmarking, or comparing
+approaches** (keywords: "probar", "medir", "benchmark", "experimento",
+"comparar contra baseline", "ver si mejora"). It does NOT apply to normal
+coding tasks (bug fixes, refactors, new features).
+
+When triggered, follow this sequence without waiting to be asked:
+
+1. **Hypothesis first.** State what you expect to happen and why, before
+   running anything. One sentence is enough.
+2. **Pre-commit to a decision rule.** Define the success threshold _before_
+   seeing results (e.g. "if Δ NDCG ≥ 0.010, update the article; otherwise
+   document as ablation"). This prevents interpreting results retroactively.
+3. **Fix the baseline.** Identify the exact prior number to beat (run, N,
+   cache status, model). Never compare against an approximate memory.
+4. **Run with cache OFF.** Publishable numbers require fresh LLM calls.
+   Never report numbers from cached runs as final.
+5. **Document the result regardless of outcome.** Failures and regressions
+   belong in `docs/obliq-bench/OBLIQ-EXPERIMENTS.md` alongside wins. A
+   refuted hypothesis is a result.
+6. **Apply the decision rule mechanically.** If the result is below threshold,
+   say so explicitly. Do not promote a result to headline because it is "close
+   enough."
+
+Reference docs for active experiments: `docs/obliq-bench/OBLIQ-OBJETIVO.md`
+(north star) and `docs/obliq-bench/OBLIQ-EXPERIMENTS.md` (full trail).
