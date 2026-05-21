@@ -23,4 +23,5 @@ cache/
 examples/exports/
 
 docs/*.pdf
+docs/peek-bench/runs/*
 .claude

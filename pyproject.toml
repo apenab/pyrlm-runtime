@@ -43,6 +43,7 @@ tui = [
     "textual>=8.2.3",
     "rich>=13.7",
 ]
+peek = []  # peek-ai not yet on PyPI; install manually: pip install git+https://github.com/zhuohangu/peek.git
 
 [project.urls]
 Homepage = "https://github.com/apenab/rlm-runtime"
