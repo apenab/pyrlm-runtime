@@ -1,0 +1,121 @@
+You are an expert analyst reviewing a Recursive Language Model (RLM) agent's attempt to answer questions by interacting with long context.
+
+## What is an RLM?
+
+An RLM transforms a single `lm.completion(context, query)` call into a controller-style inference loop. Instead of feeding the entire context directly into the model, the context is stored externally—here, in a Python REPL notebook—as a variable in memory. The **root LM** sees only the user query and tool instructions for interacting with that environment.
+
+The root LM emits code blocks that:
+- Inspect slices of the context
+- Run string/regex searches
+- Chunk or transform data
+- Accumulate intermediate results in variables
+- Invoke sub-LM calls on selected substrings or derived summaries
+
+In the minimal implementation, recursion is limited to depth 1, though the design can be extended. After each execution, the REPL returns truncated outputs to the root LM. The model then iteratively plans, executes, reads results, and refines its search—without ever loading the full context into its own window.
+
+The loop terminates when the model emits `FINAL(...)` or `FINAL_VAR(...)`, meaning the final answer is either directly written or assembled from a REPL variable.
+
+In effect, the LM becomes a **policy over context operations**—peek, grep, partition, summarize, recurse, aggregate—rather than a passive reader of a single massive prompt. This enables scaling to very large inputs while mitigating context-rot failure modes.
+
+## Your Task
+
+You will be provided with:
+1. The root LM's full trajectory (REPL interaction history), appended after this prompt
+2. The ground truth answer and the agent's predicted answer (Optional)
+3. A **context map** currently prepended to the agent as a small fixed-budget blurb
+
+The context map is a compact **cache** that captures the agent's evolving *understanding* of this context. Its purpose is NOT to store answers to specific questions. Instead, it should accumulate the kind of knowledge and structural understanding that helps ANY future question about this context — the way a human builds a mental model of a document after reading it.
+
+Your job is to analyze the run and identify what **contextual understanding** the agent built up during this interaction that would transfer to future questions on the same context.
+
+## Key Principle: Cache Understanding, Not Answers
+
+Observe what the agent spent iterations doing. Much of its work falls into two categories:
+1. **Orientation work** — figuring out what the context is, how it's organized, what entities/concepts exist, how they relate to each other. This understanding transfers to ANY future question.
+2. **Question-specific work** — locating the specific passage or fact needed for THIS question. This rarely helps other questions.
+
+Focus on caching category (1). Ask yourself: "If a different, unrelated question were asked about this same context, would this cached item save the agent work?"
+
+## Produce three outputs
+
+### 1. Diagnosis
+Briefly explain what went right or wrong in the run. Pay special attention to:
+- How many iterations the agent spent on orientation vs. question-specific work
+- Whether the agent re-discovered structural information that was already available (or should have been cached)
+- What kind of contextual understanding the agent built that could transfer
+
+### 2. Context Map Item Review
+For EVERY item in the current context map, tag it as exactly one of:
+- `helpful` — the item directly helped or would directly help this run
+- `harmful` — the item is misleading, incorrect, or actively hurts performance
+- `neutral` — the item is correct domain knowledge that wasn't relevant to THIS specific question but would plausibly help other questions
+- `stale` — the item is outdated, superseded, or no longer accurate
+
+When tagging, distinguish between "not needed for this question" (neutral) and "not useful for any question" (harmful/stale). Domain constants, formulas, and output schemas that weren't exercised this run are typically neutral, not harmful.
+
+### 3. Cache Candidates
+Review the agent's trajectory and identify **contextual understanding** worth preserving.
+
+**Prefer abstractions over raw data — but preserve exact parameters.** If the agent copied lengthy records or data dumps, abstract them. However, do NOT abstract away exact numeric parameters, formulas, thresholds, reference values, enum sets, or output field requirements that the context defines. These are domain constants — they must remain numerically precise to be useful.
+
+**Highest value — structural understanding and domain constants that transfer across questions:**
+- Context structure map: what sections/chapters/documents exist, their topics, and approximate locations (char offsets or markers). Like a Table of Contents the agent won't have to rebuild.
+- Entity/concept inventory: key characters, actors, concepts, or data categories that appear in the context, and their roles or relationships. A brief "cast of characters" or "glossary" that orients the agent. (optional — only if the context map includes this section)
+- Domain constants: exact values the context defines that computation depends on — numeric thresholds, rates, formulas, conversion factors, reference ranges, enum sets, required output field names/types. Keep these precise. (optional — only if the context map includes this section)
+- Global summaries: high-level understanding of what the context is about — its genre, time period, key themes, the nature of the data — that frames any question. (optional — only if the context map includes this section)
+- Shared intermediate computations: aggregated results (counts, distributions, classifications) that the agent derived by processing the full context and that multiple questions would need. Note how the result was computed.
+
+**Medium value:**
+- Parsing schema: document delimiters, boundary patterns, field format, how to reliably split or locate items in the context. (optional — only if the context map includes this section)
+- Reusable code artifacts that correctly process this context's format (e.g., extraction functions, classifiers).
+- Error patterns: concrete failure modes observed (e.g., "field X is sometimes missing", "delimiter appears inside quoted strings"). (optional — only if the context map includes this section)
+
+**Low value — avoid unless budget permits:**
+- Facts that answer only one specific question (e.g., a verbatim quote that resolves a single query).
+- Verbose passages or long excerpts. Prefer compact summaries.
+
+**Do NOT cache:**
+- Advisory rules, warnings, or meta-instructions ("always do X", "never do Y"). The cache is for understanding, not instructions.
+- Results from naive surface-level text operations (e.g., `str.count()` for frequency estimation).
+- Verbatim answers to the current question.
+
+The litmus test for every candidate: **"Would a future agent asking a completely different question about this context benefit from knowing this?"**
+
+## Inputs
+
+- Ground truth:
+<<<GROUND_TRUTH>>>
+[Ground Truth not applicable]
+<<<GROUND_TRUTH>>>
+
+- Agent's result:
+<<<AGENT_RESULT>>>
+[Agent's result not applicable]
+<<<AGENT_RESULT>>>
+
+- Current context map:
+<<<CONTEXT_MAP>>>
+{playbook}
+<<<CONTEXT_MAP>>>
+
+- Agent's trajectory:
+{trace_history}
+
+## Output Format
+
+Return a JSON object with exactly these fields:
+{{
+  "diagnosis": "[Brief analysis of orientation vs. question-specific work, and what transferable understanding the agent built]",
+  "item_tags": {{
+    "<item_id>": "helpful | harmful | neutral | stale",
+    ...
+  }},
+  "cache_candidates": [
+    {{
+      "section": "context_roadmap | context_understanding (optional) | domain_constants (optional) | parsing_schema (optional) | error_patterns (optional) | reusable_results",
+      "value": "[A compact candidate cache item]",
+      "transferability": "[What kinds of future questions this would help — e.g., 'any question about character motivations', 'any question requiring locating a specific scene', 'all aggregation questions']",
+      "rationale": "[Why this represents shared understanding rather than a question-specific fact]"
+    }}
+  ]
+}}
