@@ -1,6 +1,6 @@
 # pyrlm-runtime
 
-Minimal Python runtime for **Recursive Language Models (RLMs)** — inspired by the [MIT CSAIL paper](docs/rlm-paper-mit.pdf) _"Recursive Language Models"_.
+Minimal Python runtime for **Recursive Language Models (RLMs)** — inspired by the [MIT CSAIL paper](https://arxiv.org/abs/2512.24601) _"Recursive Language Models"_.
 
 RLMs solve the long-context problem: instead of sending huge contexts directly to an LLM (which truncates or degrades), the context lives as **environment state** in a Python REPL. The LLM writes code to inspect, search, and chunk the data, making **recursive subcalls** to smaller models when needed. Result: handle arbitrarily large contexts with constant token usage per step.
 
@@ -18,6 +18,8 @@ RLMs solve the long-context problem: instead of sending huge contexts directly t
   - [Trace](#trace)
   - [Cache](#cache)
   - [Router](#router)
+  - [Reranking](#reranking)
+  - [Multi-Query Retrieval](#multi-query-retrieval)
 - [REPL Backends](#repl-backends)
 - [REPL Functions Available to the LLM](#repl-functions-available-to-the-llm)
 - [Retrieval Integration](#retrieval-integration)
@@ -440,6 +442,169 @@ print(f"Tokens: {result.tokens_used}")
 | `HYBRID`              | Deterministic first, fall back to semantic        |
 | `VERIFY`              | Double-check with recursive subcalls              |
 
+### Reranking
+
+pyrlm-runtime ships two rerankers that take a pool of retrieved documents and return a
+reordered list prioritised for a given query. Both accept any `ModelAdapter`.
+
+#### ListwiseReranker (sliding window)
+
+Walks the candidate list bottom→top in overlapping windows, asking the LLM to permute
+each window. Best for pools up to ~200 documents.
+
+```python
+from pyrlm_runtime import ListwiseReranker
+
+reranker = ListwiseReranker(
+    adapter,
+    window_size=20,           # documents per LLM call
+    step=10,                  # overlap between windows
+    max_passage_chars=300,    # truncate each passage to this length
+    cache=None,               # optional FileCache to skip repeated calls
+)
+
+results = reranker.rerank(query, candidates, top_k=10)
+# candidates: list of dicts with at least {"doc_id": ..., "content": ...}
+# returns: top_k dicts in reranked order
+```
+
+**Telemetry:** `reranker.llm_calls`, `reranker.cache_hits`
+
+#### TournamentReranker
+
+Shuffles the pool into batches, keeps the top-K survivors from each batch, and repeats
+until a single batch remains. Designed for large pools (300–2,500 documents) where the
+sliding window becomes expensive.
+
+```python
+from pyrlm_runtime import TournamentReranker
+
+reranker = TournamentReranker(
+    adapter,
+    batch_size=20,            # documents per LLM call
+    top_k_per_batch=4,        # survivors per batch
+    shuffle_seed=42,          # reproducible shuffling
+    max_passage_chars=300,
+    cache=None,
+)
+
+results = reranker.rerank(query, candidates, top_k=10)
+```
+
+> **When to use which?**
+> At pool sizes ≤ ~200 docs, `ListwiseReranker` wins because it preserves the BM25
+> ordering and never permanently eliminates a document.
+> `TournamentReranker` is the better choice at 300–2,500 docs where the sliding window
+> becomes expensive and the initial ordering is less reliable.
+
+#### Evaluation metrics
+
+```python
+from pyrlm_runtime import ndcg_at_k, recall_at_k
+
+ndcg = ndcg_at_k(ranked_ids, qrels, k=10)   # qrels: {doc_id: relevance_score}
+rec  = recall_at_k(ranked_ids, qrels, k=10)
+```
+
+---
+
+### Multi-Query Retrieval
+
+For **oblique queries** — where the relevant documents don't share surface vocabulary
+with the query — a single BM25 pass misses most of the relevant corpus. The
+multi-query pattern expands coverage by reformulating the query N times with diverse
+vocabulary before retrieval, then merging and reranking the union.
+
+```text
+query → LLM rewriter (1 call) → N reformulations + original
+                                       ↓
+                              BM25 × (N+1) searches
+                                       ↓
+                              union_pool (deduplicated)
+                                       ↓
+                              ListwiseReranker (on ORIGINAL query)
+                                       ↓
+                                    top-10
+```
+
+#### QueryRewriter
+
+Generates N vocabulary-diverse reformulations via a single LLM call.
+The system prompt is caller-supplied so the class stays domain-agnostic.
+
+```python
+from pyrlm_runtime import QueryRewriter
+
+REWRITE_PROMPT = """
+You are a search-query reformulation expert. Given a query, produce exactly {n}
+reformulations that attack the same underlying concept from different vocabulary angles.
+Return JSON: {{"rewrites": ["...", ...]}}
+""".format(n=5)
+
+rewriter = QueryRewriter(
+    adapter,
+    n=5,
+    system_prompt=REWRITE_PROMPT,
+    max_tokens=400,
+    cache=None,               # optional FileCache
+)
+
+rewrites = rewriter.rewrite("find proofs using induction on binary trees")
+# → ["structural induction over recursive data", "tree depth recursion argument", ...]
+```
+
+#### union_pool
+
+Merges multiple retrieval result lists into one deduplicated list. First occurrence
+of each `doc_id` wins, preserving the highest-ranked result for each document.
+
+```python
+from pyrlm_runtime import union_pool
+
+pool_a = bm25.search(query, top_n=25)
+pool_b = bm25.search(rewrite_1, top_n=25)
+pool_c = bm25.search(rewrite_2, top_n=25)
+
+union = union_pool([pool_a, pool_b, pool_c])
+# → deduplicated list, ~60 unique documents, first-seen order
+```
+
+#### Full pipeline example
+
+```python
+from pyrlm_runtime import QueryRewriter, union_pool, ListwiseReranker
+
+rewriter = QueryRewriter(adapter, n=5, system_prompt=MY_PROMPT)
+reranker = ListwiseReranker(adapter)
+
+# Fan-out: reformulations + original query as anchor
+searches = rewriter.rewrite(query) + [query]
+pools = [bm25.search(q, top_n=25) for q in searches]
+union = union_pool(pools)            # ~125 unique docs
+top_10 = reranker.rerank(query, union, top_k=10)
+```
+
+> **Why include the original query?** The reformulations expand coverage into
+> vocabulary-distant corners of the corpus. The original query guarantees you don't
+> lose documents that BM25 already found — a critical anchor against regressions.
+
+#### Measured results ([OBLIQ-Bench](https://arxiv.org/html/2605.06235) Math, N=151)
+
+| System                                                           |   NDCG@10 |  vs BM25 |
+| ---------------------------------------------------------------- | --------: | -------: |
+| BM25 baseline                                                    |     0.028 |       1× |
+| BM25 + `ListwiseReranker`                                        |     0.057 |     2.0× |
+| `QueryRewriter` (5 rewrites) + `ListwiseReranker`                |     0.072 |     2.6× |
+| `QueryRewriter` (5 rewrites + original) + `ListwiseReranker`     |     0.093 |     3.3× |
+| **`QueryRewriter` (10 rewrites + original) + `ListwiseReranker`** | **0.103** | **3.7×** |
+
+No index changes. No fine-tuning. Purely read-path composition.
+See [`docs/obliq-bench/OBLIQ-PALANCA1-MULTIQUERY.md`](docs/obliq-bench/OBLIQ-PALANCA1-MULTIQUERY.md) for full
+experimental details and [`examples/oblique_multiquery_bench.py`](examples/oblique_multiquery_bench.py)
+to reproduce.
+
+---
+
 ## REPL Backends
 
 pyrlm-runtime ships with two interchangeable REPL backends:
@@ -686,16 +851,16 @@ LLM_BASE_URL="http://localhost:11434/v1"  # Ollama
 
 ### Common configurations by use case
 
-| Use case                       | Configuration                                                     |
-| ------------------------------ | ----------------------------------------------------------------- |
-| Small context (<8K chars)      | Use `SmartRouter` — it will pick baseline automatically           |
+| Use case                       | Configuration                                                            |
+| ------------------------------ | ------------------------------------------------------------------------ |
+| Small context (<8K chars)      | Use `SmartRouter` — it will pick baseline automatically                  |
 | Large corpus (10K+ docs)       | `RLM(adapter, retriever=ElasticsearchRetriever(...))` — search on demand |
-| Large context (>100K chars)    | `RLM(adapter, conversation_history=True, parallel_subcalls=True)` |
-| Batch many independent prompts | Use `llm_batch(prompts)` — always parallel, no config needed      |
-| Cost-sensitive                 | Use a cheaper `subcall_adapter` for subcalls                      |
-| Safety-critical code execution | `repl_backend="monty"`                                            |
-| Deterministic extraction       | `SmartRouter` with `DETERMINISTIC_FIRST` profile                  |
-| Complex multi-hop reasoning    | `recursive_subcalls=True, max_recursion_depth=2`                  |
+| Large context (>100K chars)    | `RLM(adapter, conversation_history=True, parallel_subcalls=True)`        |
+| Batch many independent prompts | Use `llm_batch(prompts)` — always parallel, no config needed             |
+| Cost-sensitive                 | Use a cheaper `subcall_adapter` for subcalls                             |
+| Safety-critical code execution | `repl_backend="monty"`                                                   |
+| Deterministic extraction       | `SmartRouter` with `DETERMINISTIC_FIRST` profile                         |
+| Complex multi-hop reasoning    | `recursive_subcalls=True, max_recursion_depth=2`                         |
 
 ### Supported providers
 
@@ -783,7 +948,7 @@ uv run ruff format src/ tests/
 
 ## References
 
-- [MIT CSAIL Paper: Recursive Language Models](docs/rlm-paper-mit.pdf) — Zhou, et al.
+- [MIT CSAIL Paper: Recursive Language Models](https://arxiv.org/abs/2512.24601) — Zhou, et al.
 - This implementation is not affiliated with MIT.
 
 ## License

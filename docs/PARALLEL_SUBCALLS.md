@@ -449,6 +449,6 @@ Possible future improvements (not in scope):
 
 ## References
 
-- [MIT CSAIL Paper: Recursive Language Models](../rlm-paper-mit.pdf) — Inspired the overall RLM architecture
+- [MIT CSAIL Paper: Recursive Language Models](https://arxiv.org/abs/2512.24601) — Inspired the overall RLM architecture
 - Python docs: [concurrent.futures.ThreadPoolExecutor](https://docs.python.org/3/library/concurrent.futures.html#threadpoolexecutor)
 - Python docs: [threading.Lock](https://docs.python.org/3/library/threading.html#threading.Lock)
