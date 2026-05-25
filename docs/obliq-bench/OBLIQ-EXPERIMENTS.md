@@ -287,6 +287,8 @@ print(top10_ids)
 | 7   | **Palanca 1 — multi-query (5 rewrites) + ListwiseReranker** | BM25 × 5 reformulaciones LLM, unión dedup (~108 docs)         | listwise rerank single-shot   | gpt-5.4-mini (rewriter) + gpt-5.1 (rerank) | 🟢 N=151 → 0.072                                                                               |
 | 7t  | **Palanca 1 variante — TournamentReranker**                 | BM25 × 5 reformulaciones, unión dedup (~108 docs)             | tournament (App. C del paper) | gpt-5.4-mini (rewriter) + gpt-5.1 (rerank) | 🟢 N=30 → 0.075 (peor que sliding, hipótesis refutada)                                         |
 | 8   | **Palanca 1 v2 — + query original en fan-out**              | BM25 × (5 rewrites + query original), unión dedup (~128 docs) | listwise rerank single-shot   | gpt-5.4-mini (rewriter) + gpt-5.1 (rerank) | 🟢 N=151 → **0.093** — umbral 0.09 alcanzado, `QueryRewriter`+`union_pool` promovidos a `src/` |
+| 9   | **Palanca 1 v3 — n=10 rewrites, top-n=50, cap=400**         | BM25 × (10 rewrites + query original), unión dedup (~367 docs) | listwise rerank single-shot  | gpt-5.4-mini (rewriter) + gpt-5.1 (rerank) | 🟢 N=151 → **0.103** — +11% relativo vs v2, pool recall 16.1% → 26.1%, 3× más LLM calls      |
+| 9t  | **Palanca 1 v3t — mismo pool, TournamentReranker**          | BM25 × (10 rewrites + query original), unión dedup (~366 docs) | tournament (App. C del paper) | gpt-5.4-mini (rewriter) + gpt-5.1 (rerank) | 🟢 N=151 → **0.105** — empate con sliding en NDCG (Δ+0.001), +9% Recall, −36% LLM calls. Refuta Cond 7t: derrota anterior era artefacto del pool pequeño. |
 
 ---
 
@@ -515,6 +517,6 @@ reranker óptimo para la Palanca 1 a pool size actual.
 ## 🎯 Siguiente paso
 
 1. ✅ **Palanca 1 v2 completada** — NDCG=0.093, umbral alcanzado, `QueryRewriter`+`union_pool` en `src/`.
-2. **Commit final:** `feat: add QueryRewriter, union_pool, ListwiseReranker, TournamentReranker + OBLIQ-Bench benchmarks`.
-3. Doble-check: re-correr los experimentos clave con cache forzado OFF (ver `docs/OBLIQ-DOUBLECHECK-ROADMAP.md`).
-4. Esqueleto del post LinkedIn / artículo con headline 0.093.
+2. ✅ **Palanca 1 v3 completada** — NDCG=0.103, +11% relativo vs v2, tablas del artículo actualizadas.
+3. **Commit final:** `feat: add QueryRewriter, union_pool, ListwiseReranker, TournamentReranker + OBLIQ-Bench benchmarks`.
+4. Publicar artículo con headline **0.1032**.

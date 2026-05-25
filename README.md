@@ -595,7 +595,8 @@ top_10 = reranker.rerank(query, union, top_k=10)
 | BM25 baseline                                                    |     0.028 |       1× |
 | BM25 + `ListwiseReranker`                                        |     0.057 |     2.0× |
 | `QueryRewriter` (5 rewrites) + `ListwiseReranker`                |     0.072 |     2.6× |
-| **`QueryRewriter` (5 rewrites + original) + `ListwiseReranker`** | **0.093** | **3.3×** |
+| `QueryRewriter` (5 rewrites + original) + `ListwiseReranker`     |     0.093 |     3.3× |
+| **`QueryRewriter` (10 rewrites + original) + `ListwiseReranker`** | **0.103** | **3.7×** |
 
 No index changes. No fine-tuning. Purely read-path composition.
 See [`docs/obliq-bench/OBLIQ-PALANCA1-MULTIQUERY.md`](docs/obliq-bench/OBLIQ-PALANCA1-MULTIQUERY.md) for full

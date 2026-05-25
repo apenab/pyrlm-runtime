@@ -53,6 +53,7 @@ uno sale a confirmar o refutar una hipótesis concreta.
 | 7   | **Palanca 1 — multi-query + rerank**           |         0.072 (N=151) | **El pool recall sube 2× (6% → 13%) y el NDCG +26% sobre Cond 2, pero por debajo del rango predicho [0.09, 0.13]. La composición funciona, pero no llega al umbral para promoverla a primitiva en `src/`.** |
 | 7t  | Ablación: TournamentReranker (N=30)            |                 0.075 | Peor que sliding (0.110 @ N=30). El torneo destruye el orden BM25 y elimina docs permanentemente — contraproducente a pool size ~108. Diseñado para 300-2500 docs.                                          |
 | 8   | **Palanca 1 v2 — + query original en fan-out** |     **0.093** (N=151) | Umbral ≥ 0.09 alcanzado. +29% sobre v1. `QueryRewriter` + `union_pool` promovidos a `src/`.                                                                                                                 |
+| 9   | **Palanca 1 v3 — n=10, top-n=50, cap=400**     |     **0.103** (N=151) | +11% relativo vs v2. Pool recall 16.1% → 26.1%, pool medio 367 docs, 3× más coste LLM. Headline del artículo actualizado.                                                                                  |
 
 Resultados Palanca 1 N=151: NDCG@10 = 0.072, pool-level recall 6.4% →
 13.0%, +26% relativo vs Cond 2 (0.057). Predicción 0.09–0.13 incumplida
@@ -79,8 +80,9 @@ Tiene dos partes y la respuesta a cada una es distinta.
 | Configuración                                                      |   NDCG@10 |
 | ------------------------------------------------------------------ | --------: |
 | Librería antes (loop + search/read_doc)                            |     0.041 |
-| Librería después (+ ListwiseReranker)                              |     0.057 |
-| Librería después (+ QueryRewriter + union_pool + ListwiseReranker) | **0.093** |
+| Librería después (+ ListwiseReranker)                                          |     0.057 |
+| Librería después (+ QueryRewriter + union_pool + ListwiseReranker)             |     0.093 |
+| Librería después (+ tuning: n=10 rewrites, top-n=50, cap=400)                 | **0.103** |
 
 **Parte 2 — ¿dónde está realmente el valor?** En la Palanca 1 queda
 visible: la mejora más grande (0.057 → ~0.11) **no viene de código
@@ -143,7 +145,7 @@ El paper lo confirma numéricamente:
 | BM25 solo                         |           0.029 |               0.028 ✓ (replicado) |
 | Dense (Qwen3-Embed-0.6B)          |           0.116 | ~0.16–0.20 con multi-query+rerank |
 | Dense (Gemini-2-Embedding)        |           0.144 | ~0.20–0.28 con multi-query+rerank |
-| BM25 + nuestro multi-query+rerank |               — |                **0.093** (medido) |
+| BM25 + nuestro multi-query+rerank |               — |                **0.103** (medido) |
 
 **Por qué el multiplicador sería mayor con dense:** nuestro multi-query
 sube el pool recall de 6.4% a 16.1% partiendo de BM25. Partiendo de un
@@ -191,8 +193,8 @@ Lee según lo que busques:
 - ✅ TournamentReranker implementado en `src/` y probado (N=5, N=30) — hipótesis refutada, sliding gana a pool ~108
 - ✅ Palanca 1 v2 (+ query original al fan-out) — NDCG=0.093, umbral 0.09 alcanzado
 - ✅ `QueryRewriter` + `union_pool` promovidos a `src/pyrlm_runtime/multiquery.py`, 15 tests
-- ⚪ Doble-check con cache OFF en todos los runs anteriores — pendiente
-- ⚪ Commit a la librería + post — pendiente
+- ✅ Palanca 1 v3 (n=10, top-n=50, cap=400) — NDCG=0.103, +11% vs v2, tablas actualizadas
+- ⚪ Commit a la librería + publicar artículo con headline 0.103 — pendiente
 
 ---
 
