@@ -173,7 +173,18 @@ class GenericChatAdapter(ModelAdapter):
         self.max_retries = max_retries
         self.retry_base_delay = retry_base_delay
         self.retry_max_delay = retry_max_delay
-        self._client = httpx.Client(timeout=self.timeout)
+        self._client = httpx.Client(
+            timeout=httpx.Timeout(
+                connect=10.0,
+                read=self.timeout,
+                write=60.0,
+                pool=10.0,
+            ),
+            limits=httpx.Limits(
+                max_keepalive_connections=5,
+                keepalive_expiry=60.0,
+            ),
+        )
 
     # Keep backward-compatible property for code that reads self.headers
     @property
@@ -202,6 +213,29 @@ class GenericChatAdapter(ModelAdapter):
         jitter = 0.5 + random.random()
         return delay * jitter
 
+    # Cap for honoring server-provided Retry-After. Azure occasionally sends
+    # large values (minutes); we cap so a malformed/extreme header can't hang
+    # the runtime indefinitely.
+    _RETRY_AFTER_MAX_SECONDS = 300.0
+
+    def _parse_retry_after(self, response: httpx.Response) -> float | None:
+        """Parse the ``Retry-After`` HTTP header into seconds.
+
+        Returns ``None`` when the header is absent or unparseable. Supports
+        the integer-seconds form (what Azure OpenAI sends on 429). Capped
+        at ``_RETRY_AFTER_MAX_SECONDS`` to bound a single retry wait.
+        """
+        raw = response.headers.get("retry-after") or response.headers.get("Retry-After")
+        if not raw:
+            return None
+        try:
+            seconds = float(raw.strip())
+        except ValueError:
+            return None
+        if seconds < 0:
+            return None
+        return min(seconds, self._RETRY_AFTER_MAX_SECONDS)
+
     def _wait(self, seconds: float) -> None:
         """Sleep for the given duration. Extracted for testability."""
         time.sleep(seconds)
@@ -227,7 +261,16 @@ class GenericChatAdapter(ModelAdapter):
                 err_msg = str(err_body.get("error", {}).get("message") or response.text)
             except Exception:
                 err_msg = response.text
-            logger.debug("HTTP %d body: %s", response.status_code, err_msg[:500])
+            # Surface 4xx bodies at WARNING level so failures don't require
+            # re-running with DEBUG to diagnose. 5xx and 429 are usually
+            # transient; for those keep the body at DEBUG to avoid log spam.
+            level = (
+                logging.WARNING
+                if 400 <= response.status_code < 500
+                and response.status_code != 429
+                else logging.DEBUG
+            )
+            logger.log(level, "HTTP %d body: %s", response.status_code, err_msg[:500])
         response.raise_for_status()
 
         try:
@@ -261,6 +304,12 @@ class GenericChatAdapter(ModelAdapter):
             return
         delay = self._calculate_delay(attempt)
         if isinstance(error, httpx.HTTPStatusError):
+            # Honor server-provided Retry-After when present. Azure sends it
+            # on 429s and the value is more accurate than our exponential
+            # backoff for rate-limit recovery.
+            retry_after = self._parse_retry_after(error.response)
+            if retry_after is not None:
+                delay = max(delay, retry_after)
             logger.warning(
                 "HTTP %d error, retrying in %.1fs (attempt %d/%d)",
                 error.response.status_code,
@@ -296,7 +345,8 @@ class GenericChatAdapter(ModelAdapter):
                     raise
                 last_error = e
                 self._handle_retryable_error(e, attempt)
-            except (httpx.TimeoutException, httpx.ConnectError) as e:
+            except (httpx.TimeoutException, httpx.ConnectError,
+                    httpx.RemoteProtocolError) as e:
                 last_error = e
                 self._handle_retryable_error(e, attempt)
 

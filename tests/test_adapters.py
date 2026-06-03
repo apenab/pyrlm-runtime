@@ -227,6 +227,57 @@ class TestGenericChatAdapterComplete:
         assert call_count == 3
         adapter.close()
 
+    def test_retry_after_header_overrides_backoff(self) -> None:
+        """Regression: when a 429 response carries ``Retry-After`` the adapter
+        must wait at least that many seconds before retrying. Azure OpenAI
+        sends this header on rate-limit responses; ignoring it caused the
+        runtime to burn its 3 retries in <10 s on a deployment whose quota
+        only recovers per-minute, propagating the 429 to the caller.
+        """
+        call_count = 0
+        waits: list[float] = []
+
+        def handler(_: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                return httpx.Response(429, json={"error": "rate_limit"},
+                                       headers={"Retry-After": "42"})
+            return _ok_response()
+
+        adapter = GenericChatAdapter(
+            endpoint="http://x", max_retries=3,
+            retry_base_delay=1.0, retry_max_delay=5.0,
+        )
+        adapter._client = httpx.Client(transport=httpx.MockTransport(handler))
+        adapter._wait = lambda s: waits.append(s)  # type: ignore[assignment]
+        result = adapter.complete(MESSAGES)
+
+        assert result.text == "hello"
+        assert call_count == 2
+        # Without the fix: delay ≈ 1*0.5..1.5 < 2s. With the fix: ≥ 42s.
+        assert waits and waits[0] >= 42.0, (
+            f"expected Retry-After=42 to be honored, got waits={waits}"
+        )
+
+    def test_retry_after_capped_to_max(self) -> None:
+        """Malformed/extreme ``Retry-After`` values must not hang the loop —
+        the wait is capped at ``_RETRY_AFTER_MAX_SECONDS`` (300 s)."""
+        waits: list[float] = []
+
+        def handler(_: httpx.Request) -> httpx.Response:
+            if not waits:
+                return httpx.Response(429, json={"error": "x"},
+                                       headers={"Retry-After": "999999"})
+            return _ok_response()
+
+        adapter = GenericChatAdapter(endpoint="http://x", max_retries=2)
+        adapter._client = httpx.Client(transport=httpx.MockTransport(handler))
+        adapter._wait = lambda s: waits.append(s)  # type: ignore[assignment]
+        adapter.complete(MESSAGES)
+
+        assert waits and waits[0] == 300.0
+
     def test_retries_on_500(self) -> None:
         call_count = 0
 
@@ -320,6 +371,26 @@ class TestGenericChatAdapterComplete:
         adapter._wait = lambda _: None  # type: ignore[assignment]
         result = adapter.complete(MESSAGES)
         assert result.text == "hello"
+        adapter.close()
+
+    def test_retries_on_remote_protocol_error(self) -> None:
+        # Regression: stale CLOSE_WAIT TCP connections raise RemoteProtocolError;
+        # must be retried, not propagated.
+        call_count = 0
+
+        def handler(_: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise httpx.RemoteProtocolError("peer closed connection without sending a response")
+            return _ok_response()
+
+        adapter = GenericChatAdapter(endpoint="http://x", max_retries=2)
+        adapter._client = httpx.Client(transport=httpx.MockTransport(handler))
+        adapter._wait = lambda _: None  # type: ignore[assignment]
+        result = adapter.complete(MESSAGES)
+        assert result.text == "hello"
+        assert call_count == 2
         adapter.close()
 
     def test_malformed_json_raises_value_error(self) -> None:
