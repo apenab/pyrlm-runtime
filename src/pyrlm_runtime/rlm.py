@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import importlib.util
 import json
@@ -15,6 +15,13 @@ import time
 from typing import Any
 from .adapters.base import ModelAdapter
 from .cache import CacheRecord, FileCache
+from .constants import (
+    FINAL_VAR_MISSING_IN_REPL_ERROR,
+    NO_ANSWER,
+    SUBCALL_FALLBACK_QUERY,
+    SUBCALL_QUESTION_PREFIX,
+    SUBCALL_SNIPPET_PREFIX,
+)
 from .context import Context
 from .env import PythonREPL, REPLProtocol
 from .events import RLMEvent, RLMEventListener
@@ -183,6 +190,24 @@ def _find_pages_in_paged_text(
 
 
 
+def _split_subcall_text(text: str) -> tuple[str, str]:
+    """Split subcall text into ``(query, snippet)``.
+
+    Subcalls are conventionally formatted as ``"Question: …\nSnippet:\n…"`` (see
+    ``ask``/``subcall_batch``). The child RLM uses the question as its query and
+    the snippet as its context. When the marker is absent, fall back to a generic
+    query over the full text.
+    """
+    if text.startswith(SUBCALL_QUESTION_PREFIX):
+        head, _, rest = text.partition("\n")
+        query = head[len(SUBCALL_QUESTION_PREFIX):].strip()
+        snippet = rest
+        if snippet.startswith(SUBCALL_SNIPPET_PREFIX):
+            snippet = snippet[len(SUBCALL_SNIPPET_PREFIX):].lstrip("\n")
+        return (query or SUBCALL_FALLBACK_QUERY, snippet)
+    return (SUBCALL_FALLBACK_QUERY, text)
+
+
 @dataclass
 class RLM:
     """Recursive Language Model runtime.
@@ -242,6 +267,16 @@ class RLM:
     recursive_subcalls: bool = False
     # Maximum recursion depth for nested RLM calls
     max_recursion_depth: int = 2
+    # Depth of THIS RLM instance in the recursion tree (0 = root). A recursive
+    # subcall spawns a child RLM at ``self.depth + 1``; at ``max_recursion_depth``
+    # the subcall falls back to a single-shot LLM call (the leaf).
+    depth: int = 0
+    # Recursive subcall implementation:
+    #   "child" — re-enter the real ``run()`` loop as a child RLM (default).
+    #   "fork"  — legacy ``_run_recursive_subcall`` mini-loop, kept temporarily
+    #             behind this flag for the old-vs-new A/B benchmark. Removed once
+    #             the refactor is validated.
+    recursion_impl: str = "child"
     # System prompt for recursive subcalls
     recursive_subcall_system_prompt: str = RECURSIVE_SUBCALL_SYSTEM_PROMPT
     # Max steps for recursive subcall RLMs (should be small)
@@ -539,7 +574,7 @@ class RLM:
             *,
             model: str | None = None,
             max_tokens: int | None = None,
-            depth: int = 1,
+            depth: int = self.depth + 1,
             parallel_group: str | None = None,
             parallel_index: int | None = None,
             parallel_total: int | None = None,
@@ -596,23 +631,130 @@ class RLM:
                 )
                 return cached.text
 
-            # Paper-aligned: recursive subcalls run a mini-RLM instead of single LLM call
+            # Paper-aligned: recursive subcalls re-enter the loop (child RLM) instead
+            # of a single LLM call. Bounded by depth: this branch only fires while
+            # ``depth < max_recursion_depth``; at the leaf the subcall falls through
+            # to the single-shot path below.
             if self.recursive_subcalls and depth < self.max_recursion_depth:
+                child_policy = None  # set in the "child" branch; read in except
                 try:
-                    result_text, sub_trace = _run_recursive_subcall(
-                        text=text,
-                        adapter=effective_subcall_adapter,
-                        system_prompt=self.recursive_subcall_system_prompt,
-                        max_steps=self.recursive_subcall_max_steps,
-                        max_tokens=max_tokens,
-                        depth=depth,
-                        logger=logger,
-                        create_repl=self._create_repl,
-                        conversation_history=self.conversation_history,
-                        max_history_tokens=self.max_history_tokens,
-                        log_truncate_code=self.log_truncate_code,
-                        log_truncate_prompt_summary=self.log_truncate_prompt_summary,
+                    if self.recursion_impl == "fork":
+                        # Legacy mini-loop, kept behind the flag for the A/B benchmark.
+                        result_text, sub_trace = _run_recursive_subcall(
+                            text=text,
+                            adapter=effective_subcall_adapter,
+                            system_prompt=self.recursive_subcall_system_prompt,
+                            max_steps=self.recursive_subcall_max_steps,
+                            max_tokens=max_tokens,
+                            depth=depth,
+                            logger=logger,
+                            create_repl=self._create_repl,
+                            conversation_history=self.conversation_history,
+                            max_history_tokens=self.max_history_tokens,
+                            log_truncate_code=self.log_truncate_code,
+                            log_truncate_prompt_summary=self.log_truncate_prompt_summary,
+                        )
+                    else:
+                        # "child": re-enter the real run() loop as a child RLM at this
+                        # subcall's depth. The child gets its OWN Policy seeded from the
+                        # parent's remaining budget (faithful to ../rlm's hierarchical
+                        # model); its consumed subcalls are rolled back up after return.
+                        # NOTE: under parallel_subcalls two sibling subtrees can read the
+                        # same `remaining` (a benign race shared with ../rlm); the rollup
+                        # keeps the global budget eventually consistent.
+                        query_text, snippet = _split_subcall_text(text)
+                        child_policy = Policy(
+                            max_steps=self.recursive_subcall_max_steps,
+                            max_subcalls=max(0, policy.max_subcalls - policy.subcalls),
+                            max_recursion_depth=self.max_recursion_depth,
+                            max_total_tokens=max(0, policy.max_total_tokens - policy.total_tokens),
+                            max_subcall_tokens=policy.max_subcall_tokens,
+                        )
+                        child = replace(
+                            self,
+                            depth=depth,
+                            policy=child_policy,
+                            cache=cache,
+                            adapter=effective_subcall_adapter,
+                            system_prompt=self.recursive_subcall_system_prompt,
+                            # The child has retriever=None / doc_tools=None, so any
+                            # retrieval-oriented supplement is not just noise but
+                            # actively harmful: it instructs the child to call es_*
+                            # tools that do not exist in its namespace (NameError).
+                            # The child reasons over the snippet in P only, so reset
+                            # the supplement. (Without this, a parent whose supplement
+                            # documents es_* — e.g. autodoc-rlm — leaks it into every
+                            # recursive child.)
+                            system_prompt_supplement="",
+                            max_tokens=max_tokens,
+                            event_listener=None,
+                            retriever=None,
+                            doc_tools=None,
+                            compaction=False,
+                            # Reset root-task finalization guards: a short child
+                            # (max_steps=recursive_subcall_max_steps) must be free to
+                            # finalize on the snippet without the root's gating.
+                            require_repl_before_final=False,
+                            require_subcall_before_final=False,
+                            min_steps=0,
+                            auto_finalize_var=None,
+                            fallback_code=None,
+                        )
+                        result_text, sub_trace = child.run(
+                            query_text, Context.from_text(snippet)
+                        )
+                        # Roll the child subtree's subcall count up into the parent.
+                        policy.account_subtree(subcalls=child_policy.subcalls)
+                except (MaxSubcallsExceeded, MaxTokensExceeded) as exc:
+                    # A recursive child that exhausts the SHARED budget must not
+                    # abort the parent's REPL exec. The parent's ask()/llm_query()
+                    # call usually sits in a cell alongside the parent's own work
+                    # (e.g. a Python extraction whose results are about to be
+                    # print()ed); letting the exception propagate kills that cell
+                    # and discards the parent's results. Degrade exactly like a
+                    # non-recursive subcall whose policy check fails: roll up what
+                    # the child spent, record the truncation in the trace, and
+                    # return the standard [SUBCALL_LIMIT] sentinel so the parent
+                    # can finalize with what it already has.
+                    if child_policy is not None:
+                        policy.account_subtree(subcalls=child_policy.subcalls)
+                    if reserved_tokens > 0:
+                        policy.release_subcall_tokens(reserved_tokens)
+                    logger.warning(
+                        "Recursive child exhausted budget at depth=%s: %s", depth, exc
                     )
+                    from .adapters.base import Usage
+
+                    spent = child_policy.total_tokens if child_policy is not None else 0
+                    result_text = (
+                        f"[SUBCALL_LIMIT] {exc}. The recursive sub-analysis ran out "
+                        "of budget before finishing. Build your final answer from the "
+                        "information you already have."
+                    )
+                    add_step(
+                        TraceStep(
+                            step_id=next_step_id(),
+                            kind="recursive_subcall",
+                            depth=depth,
+                            prompt_summary=_truncate(
+                                text, self.log_truncate_prompt_summary
+                            ),
+                            output=_truncate(result_text, self.log_truncate_output),
+                            usage=Usage(
+                                prompt_tokens=0, completion_tokens=0, total_tokens=spent
+                            ),
+                            error=str(exc),
+                            elapsed=time.perf_counter() - subcall_started,
+                            cache_hit=False,
+                            input_hash=input_hash,
+                            cache_key=cache_key,
+                            parallel_group_id=parallel_group,
+                            parallel_index=parallel_index,
+                            parallel_total=parallel_total,
+                        )
+                    )
+                    subcall_made = True
+                    return result_text
                 except Exception:
                     if reserved_tokens > 0:
                         policy.release_subcall_tokens(reserved_tokens)
@@ -783,7 +925,10 @@ class RLM:
                         question = arg[0]
                         break
             if question:
-                prepared = [f"Question: {question}\nSnippet:\n{chunk}" for chunk in prepared]
+                prepared = [
+                    f"{SUBCALL_QUESTION_PREFIX} {question}\n{SUBCALL_SNIPPET_PREFIX}\n{chunk}"
+                    for chunk in prepared
+                ]
 
             # Deduplicate chunks while preserving order
             unique_chunks: list[str] = []
@@ -999,7 +1144,10 @@ class RLM:
             ]
 
         def ask(question: str, text: str, *, max_tokens: int | None = None) -> str:
-            return subcall(f"Question: {question}\nSnippet:\n{text}", max_tokens=max_tokens)
+            return subcall(
+                f"{SUBCALL_QUESTION_PREFIX} {question}\n{SUBCALL_SNIPPET_PREFIX}\n{text}",
+                max_tokens=max_tokens,
+            )
 
         def ask_chunk(question: str, text: str, *, max_tokens: int | None = None) -> str:
             return ask(question, text, max_tokens=max_tokens)
@@ -1050,7 +1198,7 @@ class RLM:
             if lowered.startswith(("answer:", "final:", "result:")):
                 cleaned = cleaned.split(":", 1)[1].strip()
                 lowered = cleaned.lower()
-            if cleaned == "NO_ANSWER":
+            if cleaned == NO_ANSWER:
                 return None
             marker = "the key term is:"
             if marker in lowered:
@@ -1077,7 +1225,10 @@ class RLM:
         ) -> str | None:
             prepared = _normalize_chunks(chunks, chunk_size=chunk_size, overlap=overlap)
             if question:
-                prepared = [f"Question: {question}\nSnippet:\n{chunk}" for chunk in prepared]
+                prepared = [
+                    f"{SUBCALL_QUESTION_PREFIX} {question}\n{SUBCALL_SNIPPET_PREFIX}\n{chunk}"
+                    for chunk in prepared
+                ]
             seen: set[str] = set()
             for chunk in prepared:
                 if chunk in seen:
@@ -1642,8 +1793,8 @@ class RLM:
                 if not cleaned:
                     last_error = "Auto-finalize blocked: empty value."
                     return None
-                if cleaned.upper() == "NO_ANSWER" and self.fallback_code and not fallback_executed:
-                    last_error = "Auto-finalize blocked: NO_ANSWER."
+                if cleaned.upper() == NO_ANSWER and self.fallback_code and not fallback_executed:
+                    last_error = f"Auto-finalize blocked: {NO_ANSWER}."
                     return None
                 if (
                     self.auto_finalize_min_length > 0
@@ -1729,7 +1880,7 @@ class RLM:
                 if not isinstance(value, str):
                     continue
                 cleaned = value.strip()
-                if cleaned and cleaned.upper() != "NO_ANSWER":
+                if cleaned and cleaned.upper() != NO_ANSWER:
                     return cleaned
             return None
 
@@ -1872,7 +2023,7 @@ class RLM:
                     value = repl.get(self.auto_finalize_var)
                     if value is not None:
                         text = str(value).strip()
-                        if text and text.upper() != "NO_ANSWER":
+                        if text and text.upper() != NO_ANSWER:
                             return finish(text)
                 # Graceful fallback: ask model for a summary of progress
                 if self.conversation_history and history:
@@ -1913,7 +2064,7 @@ class RLM:
                         pass
                 if last_stdout and last_stdout.strip():
                     return finish(last_stdout.strip())
-                return finish("NO_ANSWER")
+                return finish(NO_ANSWER)
 
             if self.conversation_history:
                 # From step 2+, append REPL result from the previous iteration
@@ -2143,7 +2294,7 @@ class RLM:
                     resolved = _try_resolve_final(final, repl)
                     if resolved is not None:
                         return finish(resolved)
-                return finish(cleaned or "NO_ANSWER")
+                return finish(cleaned or NO_ANSWER)
 
             # Append assistant response to conversation history
             if self.conversation_history:
@@ -2196,7 +2347,7 @@ class RLM:
                             "empty_length limit reached (%s), aborting with NO_ANSWER",
                             empty_length_streak,
                         )
-                        return finish("NO_ANSWER")
+                        return finish(NO_ANSWER)
                 else:
                     empty_length_streak = 0
                     last_error = "Invalid response: empty visible content."
@@ -2277,7 +2428,7 @@ class RLM:
                 resolved = _try_resolve_final(final_unfenced, repl)
                 if resolved is None:
                     last_stdout = ""
-                    last_error = "FINAL_VAR missing in REPL; set the variable before finalizing."
+                    last_error = FINAL_VAR_MISSING_IN_REPL_ERROR
                     last_state_summary = None
                     log_invalid_response_detail(
                         "missing_final_var",
@@ -2343,7 +2494,7 @@ class RLM:
                 resolved = _try_resolve_final(final_in_code, repl)
                 if resolved is None:
                     last_stdout = ""
-                    last_error = "FINAL_VAR missing in REPL; set the variable before finalizing."
+                    last_error = FINAL_VAR_MISSING_IN_REPL_ERROR
                     last_state_summary = None
                     log_invalid_response_detail(
                         "missing_final_var",
@@ -2434,7 +2585,7 @@ class RLM:
                 value = repl.get(self.auto_finalize_var)
                 if (
                     isinstance(value, str)
-                    and value.strip().upper() == "NO_ANSWER"
+                    and value.strip().upper() == NO_ANSWER
                     and self.fallback_code
                     and not fallback_executed
                 ):
@@ -2457,14 +2608,14 @@ class RLM:
                     value = repl.get(self.auto_finalize_var)
                     if value is not None:
                         text = str(value).strip()
-                        if text and text.upper() != "NO_ANSWER":
+                        if text and text.upper() != NO_ANSWER:
                             return finish(text)
                 resolved = maybe_finish_common_result_var()
                 if resolved is not None:
                     return finish(resolved)
                 if last_stdout and last_stdout.strip():
                     return finish(last_stdout.strip())
-                return finish("NO_ANSWER")
+                return finish(NO_ANSWER)
             if maybe_run_subcall_guard():
                 resolved = maybe_auto_finalize()
                 if resolved is not None:
@@ -2480,7 +2631,7 @@ class RLM:
                 resolved = _try_resolve_final(final_unfenced, repl)
                 if resolved is None:
                     last_stdout = ""
-                    last_error = "FINAL_VAR missing in REPL; set the variable before finalizing."
+                    last_error = FINAL_VAR_MISSING_IN_REPL_ERROR
                     last_state_summary = None
                     if run_fallback("final_var_missing"):
                         resolved = maybe_auto_finalize()
@@ -2808,7 +2959,8 @@ def _run_recursive_subcall(
     repl.set(
         "ask",
         lambda q, t, max_tokens=256: simple_subcall(
-            f"Question: {q}\nSnippet:\n{t}", max_toks=max_tokens
+            f"{SUBCALL_QUESTION_PREFIX} {q}\n{SUBCALL_SNIPPET_PREFIX}\n{t}",
+            max_toks=max_tokens,
         ),
     )
 
@@ -2818,10 +2970,10 @@ def _run_recursive_subcall(
     repl_executed = False
 
     # Extract the question from the text (format: "Question: ...\nSnippet:\n...")
-    query = "Answer the question based on the provided context."
-    if text.startswith("Question:"):
+    query = SUBCALL_FALLBACK_QUERY
+    if text.startswith(SUBCALL_QUESTION_PREFIX):
         q_lines = text.split("\n", 1)
-        query = q_lines[0].replace("Question:", "").strip()
+        query = q_lines[0].removeprefix(SUBCALL_QUESTION_PREFIX).strip()
 
     # Initialize conversation history for multi-turn mode
     if conversation_history:
@@ -2954,4 +3106,4 @@ def _run_recursive_subcall(
     # Max steps reached, return best effort from stdout or NO_ANSWER
     if last_stdout and last_stdout.strip():
         return last_stdout.strip(), trace
-    return "NO_ANSWER", trace
+    return NO_ANSWER, trace
