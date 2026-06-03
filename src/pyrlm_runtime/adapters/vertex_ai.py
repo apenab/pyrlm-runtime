@@ -27,8 +27,11 @@ Example:
 from __future__ import annotations
 
 import logging
+import signal
+import threading
 import time
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 from google.cloud import aiplatform
 from vertexai.generative_models import GenerationConfig, GenerativeModel
@@ -93,6 +96,57 @@ class VertexAIAdapter:
         self.model = GenerativeModel(self.model_name)
         self.logger.debug(f"Created GenerativeModel instance: {self.model_name}")
 
+    @contextmanager
+    def _call_timeout_guard(self) -> Iterator[None]:
+        """Wall-clock guard around a Vertex generate_content call.
+
+        Uses SIGALRM on Unix main thread to interrupt the underlying gRPC
+        ``poll()`` syscall. The motivation is real: long-running bench loops
+        on Vertex regularly deadlock inside gRPC's pollset_work waiting on a
+        condition that never arrives, with the main thread blocked in
+        ``poll()`` indefinitely. The SDK provides no per-call timeout, so we
+        impose one here.
+
+        No-op when not on Unix main thread (signals can't be delivered);
+        the call may still hang there, but that's the same behavior as
+        before this change. Most importantly, the bench (RLM main loop)
+        runs on the main thread on macOS/Linux, which is exactly where the
+        deadlock was observed.
+        """
+        t = self.timeout
+        can_alarm = (
+            t is not None
+            and t > 0
+            and hasattr(signal, "SIGALRM")
+            and hasattr(signal, "setitimer")
+            and threading.current_thread() is threading.main_thread()
+        )
+        if not can_alarm:
+            yield
+            return
+
+        # If an outer SIGALRM/ITIMER_REAL timer is already armed (e.g. a nested
+        # Vertex call higher up the stack), do not arm a nested one: re-arming
+        # would cancel the outer timer when this block exits. Let the outer
+        # timeout cover this call instead. (The PythonREPL exec guard uses
+        # ITIMER_PROF, a different timer, so it does not interfere here.)
+        if signal.getitimer(signal.ITIMER_REAL)[0] > 0:
+            yield
+            return
+
+        def _on_alarm(signum: int, frame: Any) -> None:  # noqa: ARG001
+            raise TimeoutError(
+                f"VertexAI generate_content exceeded {t}s (gRPC deadlock guard)"
+            )
+
+        old = signal.signal(signal.SIGALRM, _on_alarm)
+        signal.setitimer(signal.ITIMER_REAL, float(t))
+        try:
+            yield
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, old)
+
     def complete(
         self,
         messages: list[dict[str, str]],
@@ -134,16 +188,24 @@ class VertexAIAdapter:
             try:
                 start_time = time.time()
 
-                # Generate content
-                response = self.model.generate_content(
-                    contents,
-                    generation_config=generation_config,
-                )
+                # Wall-clock guard around generate_content: the vertexai SDK
+                # does not surface a per-call timeout, and its underlying gRPC
+                # pollset can deadlock on stale connections. Without this guard
+                # the loop hangs in poll() indefinitely. The guard re-inits the
+                # model on timeout so subsequent calls start from a clean
+                # client.
+                with self._call_timeout_guard():
+                    response = self.model.generate_content(
+                        contents,
+                        generation_config=generation_config,
+                    )
 
                 elapsed = time.time() - start_time
 
-                # Extract text
-                text = response.text if response.text else ""
+                # Extract text — response.text raises ValueError when:
+                # - finish_reason=MAX_TOKENS with zero output parts
+                # - response has multiple text parts (code block + FINAL_VAR sentinel)
+                text = self._extract_text(response)
 
                 # Extract usage metadata if available
                 usage = self._extract_usage(response, text, messages)
@@ -157,6 +219,20 @@ class VertexAIAdapter:
                     usage=usage,
                     model_id=self.model_name,
                 )
+
+            except TimeoutError as exc:
+                last_error = exc
+                self.logger.warning(
+                    "VertexAI call timed out after %ss (attempt %d/%d); "
+                    "re-initializing model to recover from stale gRPC state.",
+                    self.timeout, attempt + 1, self.max_retries,
+                )
+                self._init_model()
+                if attempt < self.max_retries - 1:
+                    time.sleep(2 ** (attempt + 1))
+                    continue
+                self.logger.error("VertexAI call timed out after all retries")
+                raise
 
             except Exception as exc:
                 last_error = exc
@@ -179,6 +255,51 @@ class VertexAIAdapter:
 
         # Should not reach here, but handle exhausted retries
         raise last_error
+
+    def _extract_text(self, response: Any) -> str:
+        """Extract text from Gemini response, handling edge cases.
+
+        response.text raises ValueError when:
+        - finish_reason=MAX_TOKENS with no output parts (empty response)
+        - response has multiple text parts (code block + FINAL_VAR sentinel)
+
+        In the multi-part case we join all text parts; in the empty case we
+        return "" so the caller can treat it as an empty completion.
+        """
+        try:
+            text = response.text
+            return text if text else ""
+        except ValueError:
+            pass
+
+        # Fallback: extract parts manually from candidates
+        try:
+            candidates = response.candidates
+            if not candidates:
+                return ""
+            parts = candidates[0].content.parts if candidates[0].content else []
+            if not parts:
+                finish = getattr(candidates[0], "finish_reason", None)
+                if finish is not None:
+                    self.logger.warning(
+                        f"Empty response parts (finish_reason={finish}), returning empty text"
+                    )
+                return ""
+            # Join all text parts (handles multi-part responses). Read each part
+            # defensively: a non-text part (e.g. a function_call) can raise when
+            # its .text is accessed, and one bad part must not discard the good
+            # text parts alongside it.
+            texts = []
+            for p in parts:
+                try:
+                    if hasattr(p, "text") and p.text:
+                        texts.append(p.text)
+                except Exception:
+                    continue
+            return "\n".join(texts)
+        except Exception as exc:
+            self.logger.warning(f"Could not extract text from response parts: {exc}")
+            return ""
 
     def _convert_messages(
         self, messages: list[dict[str, str]]
