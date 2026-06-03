@@ -242,6 +242,13 @@ class RLM:
     subcall_max_tokens: int = 256
     # REPL backend: "python" (default) or "monty" (pydantic-monty sandbox)
     repl_backend: str = "python"
+    # Per-exec CPU-time budget for the REPL, in seconds. Stops runaway
+    # LLM-generated compute (e.g. O(n³) on a large graph) from hanging the
+    # loop. Measured as CPU time (ITIMER_PROF), not wall-clock, so LLM
+    # subcalls made from within a cell (ask/llm_query/llm_batch) are NOT
+    # charged against it — only actual CPU spinning is. Applies to the
+    # PythonREPL backend only; Monty has its own limits. Set to None to disable.
+    repl_exec_timeout: float | None = 60.0
     # Multi-turn conversation history (default: enabled).
     # When True the LLM sees all previous assistant responses and REPL
     # results, enabling self-correction across iterations.
@@ -278,7 +285,7 @@ class RLM:
 
     def _create_repl(self) -> REPLProtocol:
         if self.repl_backend == "python":
-            return PythonREPL()
+            return PythonREPL(exec_timeout=self.repl_exec_timeout)
         if self.repl_backend == "monty":
             from .env_monty import MontyREPL
 

@@ -8,10 +8,12 @@ import json
 import math
 import pprint
 import re
+import signal
 import textwrap
+import threading
 import time
-from contextlib import redirect_stdout
-from typing import Any, Dict, Protocol, runtime_checkable
+from contextlib import contextmanager, redirect_stdout
+from typing import Any, Dict, Iterator, Protocol, runtime_checkable
 
 from .context import Context
 
@@ -106,8 +108,10 @@ class PythonREPL:
         stdout_limit: int = 16000,
         allowed_modules: Dict[str, Any] | None = None,
         allowed_builtins: Dict[str, Any] | None = None,
+        exec_timeout: float | None = 60.0,
     ) -> None:
         self._stdout_limit = stdout_limit
+        self._exec_timeout = exec_timeout
         self._globals: Dict[str, Any] = {}
 
         modules = allowed_modules or {
@@ -198,17 +202,18 @@ class PythonREPL:
         if not code.strip():
             return ExecResult(stdout="", error=None)
         try:
-            try:
-                compiled = compile(code, "<repl>", "eval")
-            except SyntaxError:
-                compiled_exec = compile(code, "<repl>", "exec")
-                with redirect_stdout(buffer):
-                    exec(compiled_exec, self._globals, None)
-            else:
-                with redirect_stdout(buffer):
-                    result = eval(compiled, self._globals, None)
-                    if result is not None:
-                        print(result)
+            with self._timeout_guard():
+                try:
+                    compiled = compile(code, "<repl>", "eval")
+                except SyntaxError:
+                    compiled_exec = compile(code, "<repl>", "exec")
+                    with redirect_stdout(buffer):
+                        exec(compiled_exec, self._globals, None)
+                else:
+                    with redirect_stdout(buffer):
+                        result = eval(compiled, self._globals, None)
+                        if result is not None:
+                            print(result)
         except SyntaxError as exc:
             error = _format_syntax_error(exc, code)
         except Exception as exc:  # noqa: BLE001
@@ -217,6 +222,60 @@ class PythonREPL:
         # Expose last error as _stderr so the model can inspect and recover programmatically
         self._globals["_stderr"] = error or ""
         return ExecResult(stdout=stdout, error=error)
+
+    @contextmanager
+    def _timeout_guard(self) -> Iterator[None]:
+        """Raise TimeoutError if the wrapped block exceeds exec_timeout of CPU time.
+
+        Uses an ITIMER_PROF / SIGPROF timer on the Unix main thread, which
+        measures *process CPU time* (user + system), not wall-clock. This is
+        deliberate: the failure mode we guard against is runaway pure-Python
+        compute (e.g. O(n³) graph algorithms on large inputs), which burns CPU.
+        Time spent blocked in I/O does NOT advance a CPU-time timer, so an LLM
+        subcall (``ask``/``llm_query``/``llm_batch``) executed from within a
+        REPL cell is not killed by this guard even when its latency exceeds
+        ``exec_timeout`` — only actual CPU spinning is. (A wall-clock timer here
+        would conflate the two and abort legitimate subcalls.)
+
+        Because this is ITIMER_PROF, it is independent of the Vertex adapter's
+        wall-clock ITIMER_REAL guard: the two compose without either cancelling
+        the other, so an LLM call inside a REPL cell is still covered by Vertex's
+        own per-call wall-clock timeout.
+
+        Silently no-ops when not on Unix or not on the main thread (signal
+        delivery only works there); the runtime keeps working but without
+        a timeout in those contexts.
+        """
+        t = self._exec_timeout
+        can_alarm = (
+            t is not None
+            and t > 0
+            and hasattr(signal, "SIGPROF")
+            and hasattr(signal, "setitimer")
+            and threading.current_thread() is threading.main_thread()
+        )
+        if not can_alarm:
+            yield
+            return
+
+        # If an outer ITIMER_PROF timer is already armed (a parent REPL exec
+        # guard — e.g. a recursive subcall whose child REPL execs from within
+        # this cell), do not arm a nested one: re-arming would cancel the outer
+        # timer when this block exits. Let the outer guard cover this exec.
+        if signal.getitimer(signal.ITIMER_PROF)[0] > 0:
+            yield
+            return
+
+        def _on_alarm(signum: int, frame: Any) -> None:  # noqa: ARG001
+            raise TimeoutError(f"REPL exec exceeded {t}s of CPU time")
+
+        old = signal.signal(signal.SIGPROF, _on_alarm)
+        signal.setitimer(signal.ITIMER_PROF, float(t))
+        try:
+            yield
+        finally:
+            signal.setitimer(signal.ITIMER_PROF, 0)
+            signal.signal(signal.SIGPROF, old)
 
     def get(self, name: str) -> Any:
         return self._globals.get(name)
