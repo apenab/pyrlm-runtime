@@ -132,3 +132,118 @@ def estimate_tokens(text: str) -> int:
     if not text:
         return 0
     return max(1, len(text) // 4)
+
+
+# ---------------------------------------------------------------------------
+# Accurate token counting (tiktoken-based, with len//4 fallback)
+# Port of alexzhang13/rlm's token_utils.py, adapted for pyrlm-runtime.
+# ---------------------------------------------------------------------------
+
+_DEFAULT_CONTEXT_LIMIT = 128_000
+
+# Longest-key-wins substring match on model name.
+_MODEL_CONTEXT_LIMITS: dict[str, int] = {
+    "gpt-5.5": 272_000,
+    "gpt-5.4-mini": 272_000,
+    "gpt-5.4": 272_000,
+    "gpt-5.2": 272_000,
+    "gpt-5-nano": 272_000,
+    "gpt-5": 272_000,
+    "gpt-4o-mini": 128_000,
+    "gpt-4o-2024": 128_000,
+    "gpt-4o": 128_000,
+    "gpt-4-turbo": 128_000,
+    "gpt-4-32k": 32_768,
+    "gpt-4": 8_192,
+    "gpt-3.5-turbo-16k": 16_385,
+    "gpt-3.5-turbo": 16_385,
+    "o1-mini": 128_000,
+    "o1-preview": 128_000,
+    "o1": 200_000,
+    "claude-3-5-sonnet": 200_000,
+    "claude-3-5-haiku": 200_000,
+    "claude-3-opus": 200_000,
+    "claude-3-sonnet": 200_000,
+    "claude-3-haiku": 200_000,
+    "gemini-2.5-flash": 1_000_000,
+    "gemini-2.5-pro": 1_000_000,
+    "gemini-2.0-flash": 1_000_000,
+    "gemini-1.5-pro": 1_000_000,
+    "gemini-1.5-flash": 1_000_000,
+}
+
+
+def get_context_limit(model_name: str) -> int:
+    """Return context window size in tokens for ``model_name``.
+
+    Uses longest-key substring match.  Falls back to 128K for unknown models.
+    """
+    if not model_name:
+        return _DEFAULT_CONTEXT_LIMIT
+    exact = _MODEL_CONTEXT_LIMITS.get(model_name)
+    if exact is not None:
+        return exact
+    best_len, best_limit = 0, _DEFAULT_CONTEXT_LIMIT
+    for key, limit in _MODEL_CONTEXT_LIMITS.items():
+        if key in model_name and len(key) > best_len:
+            best_len, best_limit = len(key), limit
+    return best_limit
+
+
+def count_tokens(messages: list[dict], model_name: str = "") -> int:
+    """Count tokens in a list of ``{role, content}`` message dicts.
+
+    Uses tiktoken when the package is installed and ``model_name`` is
+    recognisable; otherwise falls back to ``len(content) // 4`` per message.
+    This is a significant improvement over calling ``estimate_tokens`` per
+    message for dense content (math, code, JSON) where tiktoken ratios deviate
+    far from the 4-chars-per-token heuristic.
+
+    Note: tiktoken only ships exact encodings for OpenAI models. For non-OpenAI
+    models (Claude, Gemini) there is no native encoding, so the count uses the
+    ``cl100k_base`` encoding as an approximation — close enough for budgeting
+    decisions but not an exact provider-side token count.
+    """
+    if not messages:
+        return 0
+    if model_name:
+        n = _count_tokens_tiktoken(messages, model_name)
+        if n is not None:
+            return n
+    # Fallback: sum of per-message char estimates.
+    total = 0
+    for m in messages:
+        raw = m.get("content") or ""
+        total += estimate_tokens(raw if isinstance(raw, str) else str(raw))
+    return total
+
+
+def _count_tokens_tiktoken(messages: list[dict], model_name: str) -> int | None:
+    """Return tiktoken count for ``messages`` or ``None`` if unavailable."""
+    try:
+        import tiktoken
+    except ImportError:
+        return None
+    try:
+        enc = tiktoken.encoding_for_model(model_name)
+    except Exception:
+        try:
+            enc = tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            return None
+    # OpenAI message-format overhead (3 tokens/message + reply primer).
+    total = 3  # reply primer
+    for m in messages:
+        total += 3  # per-message overhead
+        content = m.get("content")
+        if isinstance(content, str):
+            total += len(enc.encode(content))
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    total += len(enc.encode(part.get("text", "") or ""))
+        elif content is not None:
+            total += len(enc.encode(str(content)))
+        if m.get("name"):
+            total += 1
+    return total

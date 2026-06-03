@@ -21,6 +21,7 @@ class TraceStep:
         "sub_repl_exec",
         "sub_subcall",
         "baseline_call",
+        "compaction",
     ]
     depth: int
     prompt_summary: str | None = None

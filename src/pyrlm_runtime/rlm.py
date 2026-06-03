@@ -23,7 +23,9 @@ from .policy import (
     MaxSubcallsExceeded,
     MaxTokensExceeded,
     Policy,
+    count_tokens,
     estimate_tokens,
+    get_context_limit,
 )
 from .prompts import (
     BASE_SYSTEM_PROMPT,
@@ -255,6 +257,28 @@ class RLM:
     conversation_history: bool = True
     # Maximum estimated tokens for conversation history (0 = unlimited).
     max_history_tokens: int = 0
+    # Paper-aligned: compaction. When True, the root conversation history is
+    # summarized once it exceeds ``compaction_threshold_tokens`` estimated
+    # tokens, replacing the trajectory with a short summary so the loop can
+    # continue past the model's context window. The summary preserves the
+    # system prompt and the original user query, then appends an assistant
+    # message containing the running summary plus a continuation instruction.
+    compaction: bool = False
+    compaction_threshold_tokens: int = 80000
+    # When set (>0), threshold is derived as pct * model_context_limit and
+    # overrides ``compaction_threshold_tokens``.  Mirrors rlm's
+    # compaction_threshold_pct (default 0.85 there).  Requires
+    # ``compaction_model_context_limit`` to be set as the model's window in
+    # tokens — we deliberately keep this explicit instead of hard-coding a
+    # per-deployment table so the same runtime works for any backend.
+    compaction_threshold_pct: float = 0.0
+    compaction_model_context_limit: int = 0
+    # Model name used for accurate tiktoken-based history counting and for
+    # auto-resolving ``compaction_model_context_limit`` when only
+    # ``compaction_threshold_pct`` is set.  Leave empty to use the len//4
+    # fallback (backward-compatible default).
+    compaction_model_name: str = ""
+    compaction_summary_max_tokens: int = 800
     # Minimum number of steps before finalization is allowed (0 = no minimum).
     # When set, both auto-finalize and explicit FINAL are blocked until this
     # many policy steps have been taken.  The MaxStepsExceeded handler is *not*
@@ -283,6 +307,16 @@ class RLM:
     log_truncate_output: int = 1000
     log_truncate_prompt_summary: int = 2000
 
+    def __post_init__(self) -> None:
+        # Compaction operates on the multi-turn ``history`` list, which only
+        # exists when conversation_history is enabled. Without it, compaction
+        # would silently never trigger — reject the combination explicitly.
+        if self.compaction and not self.conversation_history:
+            raise ValueError(
+                "compaction=True requires conversation_history=True "
+                "(compaction summarizes the multi-turn history)."
+            )
+
     def _create_repl(self) -> REPLProtocol:
         if self.repl_backend == "python":
             return PythonREPL(exec_timeout=self.repl_exec_timeout)
@@ -293,6 +327,80 @@ class RLM:
         raise ValueError(
             f"Invalid repl_backend={self.repl_backend!r}. Expected 'python' or 'monty'."
         )
+
+    def _compaction_threshold_effective(self) -> int:
+        if self.compaction_threshold_pct > 0.0:
+            limit = self.compaction_model_context_limit
+            if limit <= 0 and self.compaction_model_name:
+                limit = get_context_limit(self.compaction_model_name)
+            if limit > 0:
+                return int(self.compaction_threshold_pct * limit)
+        return self.compaction_threshold_tokens
+
+    def _compact_history(
+        self,
+        history: list[dict[str, str]],
+        compaction_count: int,
+    ) -> tuple[list[dict[str, str]] | None, int]:
+        """Summarize the trajectory and return ``(compacted_history, tokens)``.
+
+        Returns ``(None, 0)`` if the summary call fails or yields no usable
+        text: in that case the caller MUST keep the existing history rather than
+        replace it. Committing a destructive replace on a transient summary
+        failure would discard the entire trajectory from the message stream
+        (recoverable only via the ``history`` REPL var), so we skip this round
+        and let the next iteration retry (or the hard token trim take over).
+        The second element is the summary call's token usage, for budget
+        accounting by the caller.
+        """
+        # Ask the model to summarize progress so far. Preserve exact intermediate
+        # values (numbers, variable names) the loop has computed — those are the
+        # only signal that survives the trajectory being dropped.
+        summary_messages = list(history) + [
+            {
+                "role": "user",
+                "content": (
+                    "Summarize your progress so far on the original task. Include:\n"
+                    "1. Which sub-tasks you have completed and which remain.\n"
+                    "2. Any concrete intermediate results (numbers, names, IDs, "
+                    "variable values) — preserve these exactly.\n"
+                    "3. What your next action should be.\n"
+                    "Be concise (1-3 paragraphs) but preserve all key results."
+                ),
+            }
+        ]
+        log = self.logger or logging.getLogger("pyrlm_runtime")
+        try:
+            resp = self.adapter.complete(
+                summary_messages,
+                max_tokens=self.compaction_summary_max_tokens,
+                temperature=0.0,
+            )
+        except Exception as exc:
+            log.warning("Compaction summary call failed (%r); skipping compaction", exc)
+            return None, 0
+        summary_text = (resp.text or "").strip()
+        if not summary_text:
+            log.warning("Compaction summary was empty; skipping compaction")
+            return None, 0
+        tokens = resp.usage.total_tokens if resp.usage else 0
+        # Keep system + initial user message; replace trajectory with summary
+        # plus an explicit continuation instruction.
+        head = history[:2]
+        return head + [
+            {"role": "assistant", "content": summary_text},
+            {
+                "role": "user",
+                "content": (
+                    f"Your conversation has been compacted {compaction_count} time(s) "
+                    "to fit the context window. Continue from the summary above. "
+                    "Do NOT repeat work already done. Existing REPL variables are "
+                    "still defined — use SHOW_VARS() to inspect them, and check the "
+                    "`history` REPL variable for the full pre-compaction trajectory "
+                    "(list of role/content turns and summary entries)."
+                ),
+            },
+        ], tokens
 
     def run(self, query: str, context: Context | None = None) -> tuple[str, Trace]:
         if self.retriever is not None:
@@ -387,6 +495,15 @@ class RLM:
         repl.set("peek", peek)
         repl.set("tail", tail)
         repl.set("lenP", lenp)
+
+        # Compaction history: persistent trajectory log accessible from the REPL
+        # as `history`.  Mirrors alexzhang13/rlm's append_compaction_entry pattern
+        # so that, after a compaction collapses the message stream into a short
+        # summary, the model can still recover earlier turns by inspecting
+        # `history` from the REPL.  Only populated when compaction is enabled.
+        compaction_history: list[Any] = []
+        if self.compaction:
+            repl.set("history", compaction_history)
 
         step_id = 0
         _step_lock = threading.Lock()
@@ -1717,6 +1834,8 @@ class RLM:
                 {"role": "user", "content": initial_user_message},
             ]
 
+        compaction_count = 0
+
         while True:
             try:
                 policy.check_step()
@@ -1780,7 +1899,61 @@ class RLM:
                         max_steps=policy.max_steps,
                         root_query=query,
                     )
-                    history.append({"role": "user", "content": iter_msg})
+                    iter_user_msg = {"role": "user", "content": iter_msg}
+                    history.append(iter_user_msg)
+                    if self.compaction:
+                        compaction_history.append(dict(iter_user_msg))
+                # Compaction: summarize trajectory when over threshold, before any hard trim.
+                compaction_threshold = self._compaction_threshold_effective()
+                if self.compaction and compaction_threshold > 0:
+                    hist_tokens = count_tokens(history, self.compaction_model_name)
+                    if hist_tokens >= compaction_threshold:
+                        compact_started = time.perf_counter()
+                        compacted, compaction_tokens = self._compact_history(
+                            history, compaction_count + 1
+                        )
+                        # If the summary call failed or returned nothing usable,
+                        # _compact_history returns None: keep the existing history
+                        # intact (the hard token trim below still applies) rather
+                        # than discarding the trajectory. Retry next iteration.
+                        if compacted is not None:
+                            compaction_count += 1
+                            history = compacted
+                            # Count the summary call against the token budget, like
+                            # any other root-level adapter call. Don't let a budget
+                            # overflow abort mid-compaction — the next root call's
+                            # own accounting will surface it.
+                            if compaction_tokens > 0:
+                                try:
+                                    policy.add_tokens(compaction_tokens)
+                                except MaxTokensExceeded:
+                                    pass
+                            compaction_history.append(
+                                {"type": "summary", "content": history[2].get("content", "")}
+                            )
+                            from .adapters.base import Usage
+
+                            add_step(
+                                TraceStep(
+                                    step_id=next_step_id(),
+                                    kind="compaction",
+                                    depth=0,
+                                    prompt_summary=(
+                                        f"[compaction #{compaction_count}] "
+                                        f"hist_tokens_before={hist_tokens} "
+                                        f"threshold={compaction_threshold}"
+                                    ),
+                                    output=history[2]["content"],
+                                    usage=Usage(
+                                        prompt_tokens=0,
+                                        completion_tokens=0,
+                                        total_tokens=compaction_tokens,
+                                    ),
+                                    elapsed=time.perf_counter() - compact_started,
+                                )
+                            )
+                            # Fresh context: give the model a clean slate for streak detection
+                            invalid_responses = 0
                 # Trim history if a token budget is configured
                 if self.max_history_tokens > 0:
                     history = _trim_history(history, self.max_history_tokens)
@@ -1948,6 +2121,10 @@ class RLM:
             # Append assistant response to conversation history
             if self.conversation_history:
                 history.append({"role": "assistant", "content": response.text})
+                if self.compaction:
+                    compaction_history.append(
+                        {"role": "assistant", "content": response.text}
+                    )
 
             # For trace, use the last user message as prompt summary
             prompt_summary = messages[-1]["content"] if messages else ""
