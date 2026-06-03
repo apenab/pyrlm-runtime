@@ -53,6 +53,21 @@ class Policy:
                 raise MaxSubcallsExceeded("max_subcalls exceeded")
             self.subcalls += 1
 
+    def account_subtree(self, *, subcalls: int) -> None:
+        """Roll a recursive subtree's consumed subcall count up into this policy.
+
+        A recursive subcall runs a child ``RLM`` with its **own** ``Policy`` seeded
+        from this policy's remaining budget. The child's internal subcalls are
+        counted on the child policy, so after it returns we add them here to keep
+        the global ``max_subcalls`` budget honest across sibling subtrees (otherwise
+        two siblings would each read the same ``remaining`` and double-spend). Token
+        accounting already rolls up via ``add_subcall_tokens``/``finalize_subcall_tokens``.
+        """
+        with self._lock:
+            if subcalls <= 0:
+                return
+            self.subcalls += subcalls
+
     def add_tokens(self, tokens: int) -> None:
         with self._lock:
             if tokens <= 0:

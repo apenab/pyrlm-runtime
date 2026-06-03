@@ -172,6 +172,7 @@ def test_recursive_subcall_uses_configured_repl_backend(tmp_path) -> None:
     runtime = RLM(
         adapter=adapter,
         recursive_subcalls=True,
+        recursion_impl="fork",
         max_recursion_depth=2,
         cache_dir=tmp_path / "cache",
     )
