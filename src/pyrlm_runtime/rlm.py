@@ -224,6 +224,16 @@ class RLM:
     invalid_response_limit: int | None = None
     fallback_code: str | None = None
     repl_error_limit: int | None = None
+    # Hard abort when the LLM emits N consecutive responses that produce no
+    # executable code, no FINAL, and no subcall — i.e. the trajectory is no
+    # longer making progress. Defaults to 5 so a runaway prose loop (model
+    # narrating without using the REPL) terminates after ~5 iters instead of
+    # consuming all of max_steps. Set to None to disable. Counted on the same
+    # ``invalid_responses`` streak used by ``invalid_response_limit``, but
+    # triggers an abort rather than a fallback. On abort, run() returns the
+    # sentinel string "LOOP_COLLAPSED" as the final answer — consumers should
+    # treat it like NO_ANSWER (the loop made no progress).
+    loop_collapse_limit: int | None = 5
     subcall_guard_steps: int | None = None
     fallback_guard_steps: int | None = None
     # Paper-aligned: support different adapter for subcalls
@@ -1837,6 +1847,23 @@ class RLM:
         compaction_count = 0
 
         while True:
+            # Loop-collapse guard: abort once the model has emitted
+            # ``loop_collapse_limit`` consecutive non-productive responses (no
+            # executable code, no FINAL, no subcall — any of the branches that
+            # bump ``invalid_responses``, including empty responses and blocked
+            # finalizations, not just non-code prose). Checked here at the top
+            # so it covers every non-productive path uniformly; the streak is
+            # reset to 0 on any productive iteration (and after a compaction).
+            if (
+                self.loop_collapse_limit is not None
+                and invalid_responses >= self.loop_collapse_limit
+            ):
+                logger.warning(
+                    "loop_collapse_limit reached (%s consecutive non-productive "
+                    "iters); aborting with LOOP_COLLAPSED",
+                    invalid_responses,
+                )
+                return finish("LOOP_COLLAPSED")
             try:
                 policy.check_step()
             except MaxStepsExceeded:
@@ -2362,6 +2389,7 @@ class RLM:
                         resolved = maybe_auto_finalize()
                         if resolved is not None:
                             return finish(resolved)
+                # Loop-collapse abort is handled uniformly at the top of the loop.
                 continue
 
             invalid_responses = 0
