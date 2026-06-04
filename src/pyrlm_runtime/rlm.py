@@ -667,7 +667,11 @@ class RLM:
                             max_steps=self.recursive_subcall_max_steps,
                             max_subcalls=max(0, policy.max_subcalls - policy.subcalls),
                             max_recursion_depth=self.max_recursion_depth,
-                            max_total_tokens=max(0, policy.max_total_tokens - policy.total_tokens),
+                            max_total_tokens=(
+                                None
+                                if policy.max_total_tokens is None
+                                else max(0, policy.max_total_tokens - policy.total_tokens)
+                            ),
                             max_subcall_tokens=policy.max_subcall_tokens,
                         )
                         child = replace(

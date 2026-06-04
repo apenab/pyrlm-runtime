@@ -371,14 +371,22 @@ policy = Policy(
     max_steps=40,              # Max RLM loop iterations
     max_subcalls=200,          # Max total subcalls
     max_recursion_depth=1,     # Max subcall nesting depth
-    max_total_tokens=200_000,  # Token budget (root + subcalls)
-    max_subcall_tokens=None,   # Token budget for subcalls only
+    max_total_tokens=None,     # Token budget (root + subcalls); None = unlimited (default)
+    max_subcall_tokens=None,   # Token budget for subcalls only; None = unlimited
 )
 
 rlm = RLM(adapter=adapter, policy=policy)
 ```
 
-Raises specific exceptions when limits are exceeded: `MaxStepsExceeded`, `MaxSubcallsExceeded`, `MaxRecursionExceeded`, `MaxTokensExceeded`.
+By default there is **no token budget** (`max_total_tokens=None`), matching
+[alexzhang13/rlm](https://github.com/alexzhang13/rlm)'s `max_tokens=None`: a run is bounded by
+`max_steps` / `max_subcalls` and terminates with a **graceful finalization** (the model is asked
+for a best final answer from what it has gathered). Set `max_total_tokens` to an integer only if
+you want a hard token ceiling — when it is hit the run also finalizes gracefully, just earlier
+than `max_steps` would, so the answer reflects less gathered context. Prefer `max_steps` for
+control.
+
+Raises specific exceptions when the corresponding limits are set and exceeded: `MaxStepsExceeded`, `MaxSubcallsExceeded`, `MaxRecursionExceeded`, `MaxTokensExceeded` (the last only when `max_total_tokens` / `max_subcall_tokens` is set).
 
 ### Trace
 

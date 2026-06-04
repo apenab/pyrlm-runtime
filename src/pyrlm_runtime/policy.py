@@ -29,7 +29,10 @@ class Policy:
     max_steps: int = 40
     max_subcalls: int = 200
     max_recursion_depth: int = 1
-    max_total_tokens: int = 200_000
+    # Total token budget (root + subcalls). None = unlimited, matching alexzhang13/rlm's
+    # `max_tokens=None` default. When None, the run is bounded by max_steps / max_subcalls
+    # and terminates with a graceful finalization rather than a MaxTokensExceeded abort.
+    max_total_tokens: int | None = None
     max_subcall_tokens: int | None = None
     steps: int = 0
     subcalls: int = 0
@@ -72,7 +75,7 @@ class Policy:
         with self._lock:
             if tokens <= 0:
                 return
-            if self.total_tokens + tokens > self.max_total_tokens:
+            if self.max_total_tokens is not None and self.total_tokens + tokens > self.max_total_tokens:
                 raise MaxTokensExceeded("max_total_tokens exceeded")
             self.total_tokens += tokens
 
@@ -85,7 +88,7 @@ class Policy:
             if self.max_subcall_tokens is not None:
                 if new_subcall_tokens > self.max_subcall_tokens:
                     raise MaxTokensExceeded("max_subcall_tokens exceeded")
-            if new_total_tokens > self.max_total_tokens:
+            if self.max_total_tokens is not None and new_total_tokens > self.max_total_tokens:
                 raise MaxTokensExceeded("max_total_tokens exceeded")
             self.subcall_tokens = new_subcall_tokens
             self.total_tokens = new_total_tokens
@@ -99,7 +102,7 @@ class Policy:
             if self.max_subcall_tokens is not None:
                 if self.subcall_tokens + new_reserved_subcall_tokens > self.max_subcall_tokens:
                     raise MaxTokensExceeded("max_subcall_tokens exceeded")
-            if self.total_tokens + new_reserved_total_tokens > self.max_total_tokens:
+            if self.max_total_tokens is not None and self.total_tokens + new_reserved_total_tokens > self.max_total_tokens:
                 raise MaxTokensExceeded("max_total_tokens exceeded")
             self._reserved_subcall_tokens = new_reserved_subcall_tokens
             self._reserved_total_tokens = new_reserved_total_tokens
@@ -132,7 +135,7 @@ class Policy:
                     self._reserved_subcall_tokens = remaining_reserved_subcall_tokens
                     self._reserved_total_tokens = remaining_reserved_total_tokens
                     raise MaxTokensExceeded("max_subcall_tokens exceeded")
-            if new_total_tokens + remaining_reserved_total_tokens > self.max_total_tokens:
+            if self.max_total_tokens is not None and new_total_tokens + remaining_reserved_total_tokens > self.max_total_tokens:
                 self._reserved_subcall_tokens = remaining_reserved_subcall_tokens
                 self._reserved_total_tokens = remaining_reserved_total_tokens
                 raise MaxTokensExceeded("max_total_tokens exceeded")
