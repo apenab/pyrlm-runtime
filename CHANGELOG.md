@@ -1,3 +1,16 @@
+## v1.0.0 (2026-06-04)
+
+### Feat
+
+- **policy**: update token budget handling to default to unlimited and improve exception management
+- **rlm**: child-RLM recursion behind recursion_impl flag
+- **adapters**: granular httpx timeouts, Retry-After, and RemoteProtocolError retry in GenericChatAdapter
+- **rlm**: loop-collapse guard for unproductive trajectories
+- **rlm**: conversation-history compaction with tiktoken token counting
+- **env**: per-exec CPU-time timeout for PythonREPL
+- **vertex**: resilient Gemini responses and gRPC deadlock guard
+- add reranking and multi-query primitives + OBLIQ-Bench experiments (#32)
+
 ## v0.4.2 (2026-05-14)
 
 ### Fix
