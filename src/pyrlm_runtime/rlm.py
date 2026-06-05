@@ -224,7 +224,14 @@ class RLM:
     adapter: ModelAdapter
     policy: Policy | None = None
     cache: FileCache | None = None
-    max_tokens: int = 512
+    # Max tokens the root LLM may generate per call (output cap, not a budget).
+    # Default raised to align with reasoning-model needs; the rlm reference sets
+    # this high too (32768 on its Anthropic client). For a total input+output
+    # budget use Policy.max_total_tokens instead.
+    max_output_tokens: int = 4096
+    # DEPRECATED alias for ``max_output_tokens``. When set (not None) it is
+    # copied into ``max_output_tokens`` with a DeprecationWarning.
+    max_tokens: int | None = None
     system_prompt: str = BASE_SYSTEM_PROMPT
     subcall_system_prompt: str = SUBCALL_SYSTEM_PROMPT
     cache_dir: Path | str = ".rlm_cache"
@@ -286,8 +293,12 @@ class RLM:
     parallel_subcalls: bool = False
     # Max concurrent subcalls when parallel_subcalls=True
     max_concurrent_subcalls: int = 10
-    # Default max_tokens for subcall responses (increase for reasoning models)
-    subcall_max_tokens: int = 256
+    # Max tokens a subcall response may generate (output cap). Raised from the
+    # old 256 default so reasoning-model subcalls are not truncated.
+    subcall_max_output_tokens: int = 1024
+    # DEPRECATED alias for ``subcall_max_output_tokens``. When set (not None) it
+    # is copied into ``subcall_max_output_tokens`` with a DeprecationWarning.
+    subcall_max_tokens: int | None = None
     # REPL backend: "python" (default) or "monty" (pydantic-monty sandbox)
     repl_backend: str = "python"
     # Per-exec CPU-time budget for the REPL, in seconds. Stops runaway
@@ -358,6 +369,30 @@ class RLM:
     log_truncate_prompt_summary: int = 2000
 
     def __post_init__(self) -> None:
+        # Deprecated output-cap aliases: max_tokens -> max_output_tokens,
+        # subcall_max_tokens -> subcall_max_output_tokens. The old name, when
+        # explicitly set, wins (and warns) so existing call sites keep working.
+        if self.max_tokens is not None:
+            warnings.warn(
+                "max_tokens is deprecated; use max_output_tokens (the per-call "
+                "output cap). For a total input+output budget use "
+                "Policy.max_total_tokens.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            self.max_output_tokens = self.max_tokens
+            # Clear the alias so it does not re-trigger this warning when the
+            # instance is copied via dataclasses.replace (e.g. recursive child).
+            self.max_tokens = None
+        if self.subcall_max_tokens is not None:
+            warnings.warn(
+                "subcall_max_tokens is deprecated; use subcall_max_output_tokens.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            self.subcall_max_output_tokens = self.subcall_max_tokens
+            self.subcall_max_tokens = None
+
         # Compaction operates on the multi-turn ``history`` list, which only
         # exists when conversation_history is enabled. Without it, compaction
         # would silently never trigger — reject the combination explicitly.
@@ -613,7 +648,7 @@ class RLM:
             reserved_tokens: int = 0,
         ) -> str:
             if max_tokens is None:
-                max_tokens = self.subcall_max_tokens
+                max_tokens = self.subcall_max_output_tokens
             nonlocal subcall_made
             subcall_started = time.perf_counter()
             try:
@@ -722,7 +757,7 @@ class RLM:
                             # documents es_* — e.g. autodoc-rlm — leaks it into every
                             # recursive child.)
                             system_prompt_supplement="",
-                            max_tokens=max_tokens,
+                            max_output_tokens=max_tokens,
                             event_listener=None,
                             retriever=None,
                             doc_tools=None,
@@ -935,7 +970,7 @@ class RLM:
             parallel: bool | None = None,
         ) -> list[str]:
             if max_tokens is None:
-                max_tokens = self.subcall_max_tokens
+                max_tokens = self.subcall_max_output_tokens
             remaining_args = list(args)
             if isinstance(chunks, str) and remaining_args:
                 first = remaining_args[0]
@@ -1006,7 +1041,7 @@ class RLM:
                 List of response strings in the same order as input prompts.
             """
             if max_tokens is None:
-                max_tokens = self.subcall_max_tokens
+                max_tokens = self.subcall_max_output_tokens
             if not prompts:
                 return []
             if not isinstance(prompts, list):
@@ -2108,7 +2143,7 @@ class RLM:
                         if self.max_history_tokens > 0:
                             summary_msgs = _trim_history(summary_msgs, self.max_history_tokens)
                         summary_resp = self.adapter.complete(
-                            summary_msgs, max_tokens=self.max_tokens, temperature=0.0
+                            summary_msgs, max_tokens=self.max_output_tokens, temperature=0.0
                         )
                         if summary_resp.text and summary_resp.text.strip():
                             add_step(
@@ -2232,14 +2267,16 @@ class RLM:
                     "last_user_tokens_est": (
                         estimate_tokens(messages[-1].get("content", "")) if messages else 0
                     ),
-                    "max_tokens": self.max_tokens,
+                    "max_tokens": self.max_output_tokens,
                     "messages_count": len(messages),
                     "step": policy.steps,
                 },
             )
             logger.debug("root_call step=%s/%s", policy.steps, policy.max_steps)
             root_started = time.perf_counter()
-            response = self.adapter.complete(messages, max_tokens=self.max_tokens, temperature=0.0)
+            response = self.adapter.complete(
+                messages, max_tokens=self.max_output_tokens, temperature=0.0
+            )
             root_elapsed = time.perf_counter() - root_started
             response_meta = response.meta or {}
             finish_reason = response_meta.get("finish_reason")

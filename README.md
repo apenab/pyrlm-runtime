@@ -219,7 +219,7 @@ rlm = RLM(
     adapter,                            # Required: LLM adapter (see Adapters)
     policy=None,                        # Resource limits (see Policy)
     cache=None,                         # Subcall cache (see Cache)
-    max_tokens=512,                     # Max tokens per LLM call
+    max_output_tokens=4096,             # Max tokens the root LLM generates per call
     system_prompt=BASE_SYSTEM_PROMPT,   # Override system prompt
 
     # REPL backend
@@ -669,17 +669,17 @@ ctx.document_lengths()         # List of doc lengths
 ```python
 llm_query(text, model=None, max_tokens=None)
     # Single subcall to a sub-LLM
-    # max_tokens defaults to subcall_max_tokens (256) at runtime
+    # max_tokens defaults to subcall_max_output_tokens (1024) at runtime
 
 llm_batch(prompts, model=None, max_tokens=None)
     # Process multiple prompts in parallel (always parallel, uses ThreadPoolExecutor)
-    # max_tokens defaults to subcall_max_tokens (256) at runtime
+    # max_tokens defaults to subcall_max_output_tokens (1024) at runtime
     # → Use this for independent batch operations
     # Example: llm_batch(["prompt1", "prompt2", "prompt3"])
 
 llm_query_batch(chunks, model=None, max_tokens=None, parallel=None)
     # Batch subcall over multiple chunks
-    # max_tokens defaults to subcall_max_tokens (256) at runtime
+    # max_tokens defaults to subcall_max_output_tokens (1024) at runtime
     # → Parallel if parallel_subcalls=True or parallel=True (default: sequential)
 
 ask(question, text, max_tokens=None)
