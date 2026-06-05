@@ -135,9 +135,7 @@ class VertexAIAdapter:
             return
 
         def _on_alarm(signum: int, frame: Any) -> None:  # noqa: ARG001
-            raise TimeoutError(
-                f"VertexAI generate_content exceeded {t}s (gRPC deadlock guard)"
-            )
+            raise TimeoutError(f"VertexAI generate_content exceeded {t}s (gRPC deadlock guard)")
 
         old = signal.signal(signal.SIGALRM, _on_alarm)
         signal.setitimer(signal.ITIMER_REAL, float(t))
@@ -225,7 +223,9 @@ class VertexAIAdapter:
                 self.logger.warning(
                     "VertexAI call timed out after %ss (attempt %d/%d); "
                     "re-initializing model to recover from stale gRPC state.",
-                    self.timeout, attempt + 1, self.max_retries,
+                    self.timeout,
+                    attempt + 1,
+                    self.max_retries,
                 )
                 self._init_model()
                 if attempt < self.max_retries - 1:
@@ -301,9 +301,7 @@ class VertexAIAdapter:
             self.logger.warning(f"Could not extract text from response parts: {exc}")
             return ""
 
-    def _convert_messages(
-        self, messages: list[dict[str, str]]
-    ) -> list[dict[str, Any]]:
+    def _convert_messages(self, messages: list[dict[str, str]]) -> list[dict[str, Any]]:
         """Convert OpenAI-style messages to Gemini format.
 
         OpenAI roles: system, user, assistant
@@ -348,16 +346,12 @@ class VertexAIAdapter:
             for i, content_msg in enumerate(contents):
                 if content_msg["role"] == "user":
                     original_text = content_msg["parts"][0]["text"]
-                    contents[i]["parts"][0]["text"] = (
-                        f"{combined_instruction}\n\n{original_text}"
-                    )
+                    contents[i]["parts"][0]["text"] = f"{combined_instruction}\n\n{original_text}"
                     break
 
         return contents
 
-    def _extract_usage(
-        self, response: Any, text: str, messages: list[dict[str, str]]
-    ) -> Usage:
+    def _extract_usage(self, response: Any, text: str, messages: list[dict[str, str]]) -> Usage:
         """Extract token usage from Gemini response.
 
         Gemini API provides usage metadata in response.usage_metadata.

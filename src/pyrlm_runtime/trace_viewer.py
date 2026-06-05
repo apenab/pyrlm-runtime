@@ -53,8 +53,8 @@ _KIND_LABEL: dict[str, str] = {
     "recursive_subcall": "Recursive Subcall",
 }
 
-_MAX_LABEL_EXTRA = 28   # max chars for code/prompt snippet in tree label
-_PREVIEW_LINES = 8      # lines shown before the "N more lines ▶" collapsible
+_MAX_LABEL_EXTRA = 28  # max chars for code/prompt snippet in tree label
+_PREVIEW_LINES = 8  # lines shown before the "N more lines ▶" collapsible
 
 
 def _strip_code_fences(text: str) -> str:
@@ -128,16 +128,18 @@ def _text_widgets(
     return widgets
 
 
-def _build_step_widgets(
-    step: TraceStep, final_answer: str | None = None
-) -> list[Widget]:
+def _build_step_widgets(step: TraceStep, final_answer: str | None = None) -> list[Widget]:
     """Build Textual widgets for the step detail panel."""
     widgets: list[Widget] = []
     color = _KIND_COLOR.get(step.kind, "white")
 
     # — Header —
     widgets.append(
-        Static(Rule(f"[bold {color}]{_KIND_LABEL.get(step.kind, step.kind)}[/bold {color}]", style=color))
+        Static(
+            Rule(
+                f"[bold {color}]{_KIND_LABEL.get(step.kind, step.kind)}[/bold {color}]", style=color
+            )
+        )
     )
 
     # — Metadata —
@@ -301,9 +303,7 @@ class TraceSummaryBar(Static):
     summary_text: str = ""
 
     def load_trace(self, trace: Trace) -> None:
-        total_tokens = sum(
-            s.usage.total_tokens for s in trace.steps if s.usage is not None
-        )
+        total_tokens = sum(s.usage.total_tokens for s in trace.steps if s.usage is not None)
         errors = sum(1 for s in trace.steps if s.error)
         cached = sum(1 for s in trace.steps if s.cache_hit)
         self.summary_text = (

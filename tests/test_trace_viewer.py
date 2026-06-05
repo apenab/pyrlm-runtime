@@ -196,7 +196,9 @@ def _widgets_to_text(widgets) -> str:
 def test_build_step_widgets_repl_with_error() -> None:
     from pyrlm_runtime.trace_viewer import _build_step_widgets
 
-    step = _make_step(1, "repl_exec", depth=0, code="1/0", error="ZeroDivisionError: division by zero")
+    step = _make_step(
+        1, "repl_exec", depth=0, code="1/0", error="ZeroDivisionError: division by zero"
+    )
     widgets = _build_step_widgets(step)
     assert widgets  # not empty
     rendered = _widgets_to_text(widgets)

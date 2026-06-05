@@ -6,6 +6,7 @@ recursive subcall has the full toolset (``llm_batch``/parallel, deeper
 recursion) and shares the budget/cache with the parent. The fork path runs a
 trimmed mini-loop that cannot do any of that — these tests pin the difference.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -25,8 +26,8 @@ ROOT = BASE_SYSTEM_PROMPT[:50]
 CHILD = RECURSIVE_SUBCALL_SYSTEM_PROMPT[:50]
 LEAF = SUBCALL_SYSTEM_PROMPT[:50]
 # Phase markers within an agent's own loop.
-INIT = "have not interacted"   # build_root_user_message (step 1)
-ITER = "[REPL Result]"          # build_iteration_message (step >= 2)
+INIT = "have not interacted"  # build_root_user_message (step 1)
+ITER = "[REPL Result]"  # build_iteration_message (step >= 2)
 
 
 def _is_root(p: str) -> bool:
@@ -69,22 +70,24 @@ def test_child_recursion_runs_full_loop_with_batch(tmp_path) -> None:
     fan-out) and a real multi-step loop — impossible in the fork."""
     rules = ROOT_RULES + [
         # Child runs a real loop: batch two grandchild calls, then finalize.
-        _rule(_first(_is_child),
-              "parts = llm_batch(['GQ1', 'GQ2'])\nanswer = parts[0]"),
+        _rule(_first(_is_child), "parts = llm_batch(['GQ1', 'GQ2'])\nanswer = parts[0]"),
         _rule(_later(_is_child), "FINAL_VAR: answer"),
         # Leaf grandchildren (single-shot at max depth).
         _rule(lambda p: LEAF in p and "GQ1" in p, "LEAF1"),
         _rule(lambda p: LEAF in p and "GQ2" in p, "LEAF2"),
     ]
     output, trace = _run(
-        FakeAdapter(rules=rules), tmp_path=tmp_path,
-        recursive_subcalls=True, recursion_impl="child", max_recursion_depth=2,
+        FakeAdapter(rules=rules),
+        tmp_path=tmp_path,
+        recursive_subcalls=True,
+        recursion_impl="child",
+        max_recursion_depth=2,
     )
     kinds = {s.kind for s in trace.steps}
     assert output == "LEAF1"
-    assert "recursive_subcall" in kinds          # root spawned a child RLM
-    assert "sub_repl_exec" in kinds              # child ran real REPL code
-    assert "sub_subcall" in kinds                # child fanned out to grandchildren
+    assert "recursive_subcall" in kinds  # root spawned a child RLM
+    assert "sub_repl_exec" in kinds  # child ran real REPL code
+    assert "sub_subcall" in kinds  # child fanned out to grandchildren
     assert max((s.depth or 0) for s in trace.steps) >= 2
 
 
@@ -93,15 +96,18 @@ def test_child_subtree_respects_global_budget(tmp_path) -> None:
     global ``max_subcalls`` (rolled up into the parent policy)."""
     policy = Policy(max_subcalls=2, max_steps=40)
     rules = ROOT_RULES + [
-        _rule(_first(_is_child),
-              "a = llm_query('GQ1')\nb = llm_query('GQ2')\nanswer = a"),
+        _rule(_first(_is_child), "a = llm_query('GQ1')\nb = llm_query('GQ2')\nanswer = a"),
         _rule(_later(_is_child), "FINAL_VAR: answer"),
         _rule(lambda p: LEAF in p and "GQ1" in p, "LEAF1"),
         _rule(lambda p: LEAF in p and "GQ2" in p, "LEAF2"),
     ]
     _run(
-        FakeAdapter(rules=rules), tmp_path=tmp_path, policy=policy,
-        recursive_subcalls=True, recursion_impl="child", max_recursion_depth=2,
+        FakeAdapter(rules=rules),
+        tmp_path=tmp_path,
+        policy=policy,
+        recursive_subcalls=True,
+        recursion_impl="child",
+        max_recursion_depth=2,
     )
     # Root recursive call (1) + one grandchild that fit the budget, rolled up (→2).
     # The second grandchild is blocked by the shared budget.
@@ -114,15 +120,18 @@ def test_fork_subtree_leaks_global_budget(tmp_path) -> None:
     child path fixes — kept as an explicit guard against accidental reuse."""
     policy = Policy(max_subcalls=2, max_steps=40)
     rules = ROOT_RULES + [
-        _rule(_first(_is_child),
-              "a = llm_query('GQ1')\nb = llm_query('GQ2')\nanswer = a"),
+        _rule(_first(_is_child), "a = llm_query('GQ1')\nb = llm_query('GQ2')\nanswer = a"),
         _rule(_later(_is_child), "FINAL_VAR: answer"),
         _rule(lambda p: LEAF in p and "GQ1" in p, "LEAF1"),
         _rule(lambda p: LEAF in p and "GQ2" in p, "LEAF2"),
     ]
     _run(
-        FakeAdapter(rules=rules), tmp_path=tmp_path, policy=policy,
-        recursive_subcalls=True, recursion_impl="fork", max_recursion_depth=2,
+        FakeAdapter(rules=rules),
+        tmp_path=tmp_path,
+        policy=policy,
+        recursive_subcalls=True,
+        recursion_impl="fork",
+        max_recursion_depth=2,
     )
     # Only the root recursive call is counted; the two internal calls leak.
     assert policy.subcalls == 1
@@ -133,15 +142,17 @@ def test_child_recursion_shares_cache(tmp_path) -> None:
     cache (cache_hit) instead of re-running the child loop."""
     rules = [
         # Root issues the SAME recursive subcall twice, then finalizes.
-        _rule(_first(_is_root),
-              "x = ask('CHILDQ', 'SNIP')\ny = ask('CHILDQ', 'SNIP')\nanswer = x"),
+        _rule(_first(_is_root), "x = ask('CHILDQ', 'SNIP')\ny = ask('CHILDQ', 'SNIP')\nanswer = x"),
         _rule(_later(_is_root), "FINAL_VAR: answer"),
         _rule(_first(_is_child), "answer = 'CVAL'"),
         _rule(_later(_is_child), "FINAL_VAR: answer"),
     ]
     output, trace = _run(
-        FakeAdapter(rules=rules), tmp_path=tmp_path,
-        recursive_subcalls=True, recursion_impl="child", max_recursion_depth=2,
+        FakeAdapter(rules=rules),
+        tmp_path=tmp_path,
+        recursive_subcalls=True,
+        recursion_impl="child",
+        max_recursion_depth=2,
     )
     assert output == "CVAL"
     assert sum(1 for s in trace.steps if s.kind == "recursive_subcall") == 1
@@ -155,8 +166,11 @@ def test_depth_bound_falls_back_to_single_shot(tmp_path) -> None:
         _rule(lambda p: LEAF in p and "CHILDQ" in p, "LEAFANS"),
     ]
     output, trace = _run(
-        FakeAdapter(rules=rules), tmp_path=tmp_path,
-        recursive_subcalls=True, recursion_impl="child", max_recursion_depth=1,
+        FakeAdapter(rules=rules),
+        tmp_path=tmp_path,
+        recursive_subcalls=True,
+        recursion_impl="child",
+        max_recursion_depth=1,
     )
     kinds = {s.kind for s in trace.steps}
     assert output == "LEAFANS"
@@ -172,8 +186,10 @@ def test_default_no_recursion_keeps_single_shot(tmp_path) -> None:
         _rule(lambda p: LEAF in p and "CHILDQ" in p, "LEAFANS"),
     ]
     output, trace = _run(
-        FakeAdapter(rules=rules), tmp_path=tmp_path,
-        recursive_subcalls=False, max_recursion_depth=2,
+        FakeAdapter(rules=rules),
+        tmp_path=tmp_path,
+        recursive_subcalls=False,
+        max_recursion_depth=2,
     )
     kinds = {s.kind for s in trace.steps}
     assert output == "LEAFANS"
@@ -190,8 +206,11 @@ def test_both_impls_terminate(tmp_path, impl) -> None:
         _rule(lambda p: LEAF in p and "GQ1" in p, "LEAF1"),
     ]
     output, _ = _run(
-        FakeAdapter(rules=rules), tmp_path=tmp_path,
-        recursive_subcalls=True, recursion_impl=impl, max_recursion_depth=2,
+        FakeAdapter(rules=rules),
+        tmp_path=tmp_path,
+        recursive_subcalls=True,
+        recursion_impl=impl,
+        max_recursion_depth=2,
     )
     assert output == "LEAF1"
 
@@ -217,14 +236,16 @@ def test_recursive_child_budget_exhaustion_does_not_abort_parent_cell(tmp_path) 
     # Root: ask() (will recurse + blow up), then a SECOND statement that must run
     # iff ask() returned instead of raising. Finalize from that second statement.
     rules = [
-        _rule(_first(_is_root),
-              "res = ask('CHILDQ', 'SNIP')\nsurvived = 'OK:' + res[:15]"),
+        _rule(_first(_is_root), "res = ask('CHILDQ', 'SNIP')\nsurvived = 'OK:' + res[:15]"),
         _rule(_later(_is_root), "FINAL_VAR: survived"),
         # Child rules are never reached — the adapter raises on the child call.
     ]
     output, trace = _run(
-        _ChildBudgetRaisingAdapter(rules=rules), tmp_path=tmp_path,
-        recursive_subcalls=True, recursion_impl="child", max_recursion_depth=2,
+        _ChildBudgetRaisingAdapter(rules=rules),
+        tmp_path=tmp_path,
+        recursive_subcalls=True,
+        recursion_impl="child",
+        max_recursion_depth=2,
     )
     # The cell survived: `survived` was assigned from the sentinel, so the answer
     # carries the OK prefix and the SUBCALL_LIMIT marker (not a NO_ANSWER / crash).
@@ -249,16 +270,18 @@ def test_child_does_not_inherit_parent_system_prompt_supplement(tmp_path) -> Non
     ]
     adapter = FakeAdapter(rules=rules)
     output, _ = _run(
-        adapter, tmp_path=tmp_path,
-        recursive_subcalls=True, recursion_impl="child", max_recursion_depth=2,
+        adapter,
+        tmp_path=tmp_path,
+        recursive_subcalls=True,
+        recursion_impl="child",
+        max_recursion_depth=2,
         system_prompt_supplement="\n\n## RETRIEVAL\n" + LEAK,
     )
     assert output == "LEAF1"
 
     # call_log holds every messages list (root + child + leaf share the adapter).
     system_prompts = [
-        msgs[0]["content"] for msgs in adapter.call_log
-        if msgs and msgs[0].get("role") == "system"
+        msgs[0]["content"] for msgs in adapter.call_log if msgs and msgs[0].get("role") == "system"
     ]
     child_prompts = [p for p in system_prompts if _is_child(p)]
     root_prompts = [p for p in system_prompts if _is_root(p)]

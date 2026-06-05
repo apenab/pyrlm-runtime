@@ -243,7 +243,13 @@ class TestReturnTypes:
     def test_all_eight_tools_present(self, tmp_path):
         tools = _make_tools(tmp_path)
         expected = {
-            "list_pdfs", "get_pdf_info", "read_pdf_pages", "extract_table",
-            "search_in_pdf", "search_corpus", "search_corpus_structured", "resolve_doc_path",
+            "list_pdfs",
+            "get_pdf_info",
+            "read_pdf_pages",
+            "extract_table",
+            "search_in_pdf",
+            "search_corpus",
+            "search_corpus_structured",
+            "resolve_doc_path",
         }
         assert expected.issubset(set(tools.keys()))

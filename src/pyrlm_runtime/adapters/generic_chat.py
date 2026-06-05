@@ -88,8 +88,7 @@ def _extract_response_meta(data: dict[str, Any]) -> dict[str, Any]:
     )
     if isinstance(content, list):
         reasoning_present = reasoning_present or any(
-            isinstance(block, Mapping)
-            and "reasoning" in str(block.get("type", "")).lower()
+            isinstance(block, Mapping) and "reasoning" in str(block.get("type", "")).lower()
             for block in content
         )
     meta: dict[str, Any] = {
@@ -266,8 +265,7 @@ class GenericChatAdapter(ModelAdapter):
             # transient; for those keep the body at DEBUG to avoid log spam.
             level = (
                 logging.WARNING
-                if 400 <= response.status_code < 500
-                and response.status_code != 429
+                if 400 <= response.status_code < 500 and response.status_code != 429
                 else logging.DEBUG
             )
             logger.log(level, "HTTP %d body: %s", response.status_code, err_msg[:500])
@@ -345,8 +343,7 @@ class GenericChatAdapter(ModelAdapter):
                     raise
                 last_error = e
                 self._handle_retryable_error(e, attempt)
-            except (httpx.TimeoutException, httpx.ConnectError,
-                    httpx.RemoteProtocolError) as e:
+            except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
                 last_error = e
                 self._handle_retryable_error(e, attempt)
 

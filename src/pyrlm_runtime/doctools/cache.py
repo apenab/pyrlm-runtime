@@ -85,12 +85,8 @@ class DocumentCache:
 
     def get_stats(self) -> dict[str, int]:
         with self._lock:
-            total_size = sum(
-                f.stat().st_size for f in self.root.rglob("*.md") if f.exists()
-            )
-            cached_pages = sum(
-                1 for f in self.root.rglob("page_???.md") if f.exists()
-            )
+            total_size = sum(f.stat().st_size for f in self.root.rglob("*.md") if f.exists())
+            cached_pages = sum(1 for f in self.root.rglob("page_???.md") if f.exists())
             return {
                 "hits": self._hits,
                 "misses": self._misses,

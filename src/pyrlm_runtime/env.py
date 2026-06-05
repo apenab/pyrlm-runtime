@@ -58,8 +58,7 @@ def _summarize_value(value: Any) -> str:
     if isinstance(value, dict):
         keys = list(value.keys())
         safe_keys = [
-            k if isinstance(k, (str, int, float, bool)) else type(k).__name__
-            for k in keys[:3]
+            k if isinstance(k, (str, int, float, bool)) else type(k).__name__ for k in keys[:3]
         ]
         suffix = ", ..." if len(keys) > 3 else ""
         preview = _truncate_repr(safe_keys, max_chars=50)
@@ -69,7 +68,9 @@ def _summarize_value(value: Any) -> str:
     return type(value).__name__
 
 
-def _snapshot_user_state(values: Dict[str, Any], scaffold: set[str] | None = None) -> Dict[str, str]:
+def _snapshot_user_state(
+    values: Dict[str, Any], scaffold: set[str] | None = None
+) -> Dict[str, str]:
     skip = {"__builtins__", "__name__"} | (scaffold or set())
     snapshot: Dict[str, str] = {}
     for name, value in values.items():

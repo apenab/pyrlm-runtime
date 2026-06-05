@@ -42,7 +42,9 @@ class DocumentPolicy:
     tables_extracted: int = 0
 
     _opened_paths: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
-    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False, compare=False
+    )
 
     def check_pdf_open(self, path: str) -> None:
         """Increment pdfs_opened on first access of a path, or raise MaxPDFsExceeded."""
@@ -50,9 +52,7 @@ class DocumentPolicy:
             if path in self._opened_paths:
                 return  # already counted
             if self.pdfs_opened >= self.max_pdfs_per_query:
-                raise MaxPDFsExceeded(
-                    f"Reached limit of {self.max_pdfs_per_query} PDFs per query"
-                )
+                raise MaxPDFsExceeded(f"Reached limit of {self.max_pdfs_per_query} PDFs per query")
             self.pdfs_opened += 1
             self._opened_paths.add(path)
 

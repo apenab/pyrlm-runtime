@@ -140,7 +140,9 @@ class AzureOpenAIAdapter(ModelAdapter):
         max_tokens: int = 512,
         temperature: float | None = 0.0,
     ) -> ModelResponse:
-        effective_temp = self._temperature_fallback if self._temperature_unsupported else temperature
+        effective_temp = (
+            self._temperature_fallback if self._temperature_unsupported else temperature
+        )
         try:
             return self._adapter.complete(
                 messages, max_tokens=max_tokens, temperature=effective_temp
@@ -175,9 +177,7 @@ class AzureOpenAIAdapter(ModelAdapter):
             )
             self._temperature_unsupported = True
             self._temperature_fallback = fallback
-            return self._adapter.complete(
-                messages, max_tokens=max_tokens, temperature=fallback
-            )
+            return self._adapter.complete(messages, max_tokens=max_tokens, temperature=fallback)
 
     def close(self) -> None:
         self._adapter.close()

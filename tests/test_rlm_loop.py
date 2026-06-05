@@ -133,7 +133,7 @@ def test_llm_batch_records_coerces_common_extraction_shapes() -> None:
         script=[
             (
                 'rows = llm_batch_records(["entity-one", "no-answer", "wrapped"])\n'
-                'answer = f"{rows[0][0][\'name\']}|{len(rows[1])}|{rows[2][0][\'name\']}"\n'
+                "answer = f\"{rows[0][0]['name']}|{len(rows[1])}|{rows[2][0]['name']}\"\n"
                 "print(answer)"
             ),
             "FINAL_VAR: answer",
@@ -292,28 +292,30 @@ def test_conversation_history_contains_state_summary_after_silent_repl_step() ->
 
 
 def test_empty_length_responses_abort_with_explicit_no_answer(caplog) -> None:
-    adapter = MetaSequenceAdapter([
-        ModelResponse(
-            text="",
-            usage=Usage(100, 40, 140),
-            meta={
-                "provider": "openai_compatible",
-                "finish_reason": "length",
-                "content_kind": "null",
-                "reasoning_present": True,
-            },
-        ),
-        ModelResponse(
-            text="",
-            usage=Usage(120, 45, 165),
-            meta={
-                "provider": "openai_compatible",
-                "finish_reason": "length",
-                "content_kind": "null",
-                "reasoning_present": True,
-            },
-        ),
-    ])
+    adapter = MetaSequenceAdapter(
+        [
+            ModelResponse(
+                text="",
+                usage=Usage(100, 40, 140),
+                meta={
+                    "provider": "openai_compatible",
+                    "finish_reason": "length",
+                    "content_kind": "null",
+                    "reasoning_present": True,
+                },
+            ),
+            ModelResponse(
+                text="",
+                usage=Usage(120, 45, 165),
+                meta={
+                    "provider": "openai_compatible",
+                    "finish_reason": "length",
+                    "content_kind": "null",
+                    "reasoning_present": True,
+                },
+            ),
+        ]
+    )
     runtime = RLM(
         adapter=adapter,
         invalid_response_limit=2,
@@ -399,12 +401,14 @@ def test_build_iteration_message_truncates_large_stdout() -> None:
 
 
 def test_max_tokens_exceeded_executes_last_code_and_returns_materialized_answer() -> None:
-    adapter = MetaSequenceAdapter([
-        ModelResponse(
-            text='final_answer = "done"\nprint(final_answer)',
-            usage=Usage(10, 10, 20),
-        ),
-    ])
+    adapter = MetaSequenceAdapter(
+        [
+            ModelResponse(
+                text='final_answer = "done"\nprint(final_answer)',
+                usage=Usage(10, 10, 20),
+            ),
+        ]
+    )
     runtime = RLM(
         adapter=adapter,
         policy=Policy(max_total_tokens=5),
@@ -781,8 +785,4 @@ def test_multiline_final_answer_is_preserved() -> None:
     runtime = RLM(adapter=adapter)
     output, _trace = runtime.run("Return a result.", Context.from_text("ctx"))
 
-    assert output == (
-        "Resumen de ingresos:\n\n"
-        "1) Empresa A | 2024 | 100\n"
-        "2) Empresa B | 2023 | 80"
-    )
+    assert output == ("Resumen de ingresos:\n\n1) Empresa A | 2024 | 100\n2) Empresa B | 2023 | 80")

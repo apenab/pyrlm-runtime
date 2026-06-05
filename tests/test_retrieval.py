@@ -33,12 +33,14 @@ class InMemoryRetriever:
         results = []
         for doc_id, content in self.docs.items():
             if query.lower() in content.lower():
-                results.append({
-                    "doc_id": doc_id,
-                    "content": content,
-                    "score": 1.0,
-                    "metadata": {},
-                })
+                results.append(
+                    {
+                        "doc_id": doc_id,
+                        "content": content,
+                        "score": 1.0,
+                        "metadata": {},
+                    }
+                )
         return results[:top_k]
 
     def vector_search(self, query, *, top_k=10, filters=None):
@@ -74,10 +76,12 @@ class SchemaAwareRetriever(InMemoryRetriever):
 
 class LogicalDocFallbackRetriever(InMemoryRetriever):
     def __init__(self) -> None:
-        super().__init__({
-            "page-001": "Page 1 text",
-            "page-002": "Page 2 text",
-        })
+        super().__init__(
+            {
+                "page-001": "Page 1 text",
+                "page-002": "Page 2 text",
+            }
+        )
 
     def search(self, query, *, top_k=10, filters=None):
         del query, top_k, filters
@@ -331,10 +335,7 @@ class TestElasticsearchRetrieverSearch:
 
         call_body = mock_client.search.call_args[1]["body"]
         filter_clauses = call_body["query"]["bool"]["filter"]
-        assert any(
-            clause.get("term", {}).get("category") == "legal"
-            for clause in filter_clauses
-        )
+        assert any(clause.get("term", {}).get("category") == "legal" for clause in filter_clauses)
 
     def test_search_with_list_filter(self) -> None:
         retriever = _make_es_retriever()
@@ -367,8 +368,16 @@ class TestElasticsearchRetrieverSearch:
         retriever = _make_es_retriever()
         mock_client = MagicMock()
         mock_client.search.return_value = _mock_search_response(
-            {"_id": "doc__p2", "_score": 1.0, "_source": {"content": "Page 2", "page_num": 2, "doc_id": "doc", "page_count": 5}},
-            {"_id": "doc__p1", "_score": 1.0, "_source": {"content": "Page 1", "page_num": 1, "doc_id": "doc", "page_count": 5}},
+            {
+                "_id": "doc__p2",
+                "_score": 1.0,
+                "_source": {"content": "Page 2", "page_num": 2, "doc_id": "doc", "page_count": 5},
+            },
+            {
+                "_id": "doc__p1",
+                "_score": 1.0,
+                "_source": {"content": "Page 1", "page_num": 1, "doc_id": "doc", "page_count": 5},
+            },
         )
         retriever._client = mock_client
 
@@ -399,8 +408,26 @@ class TestElasticsearchRetrieverSearch:
                 "'Fielddata access on the _id field is disallowed')"
             ),
             _mock_search_response(
-                {"_id": "doc__p2", "_score": 1.0, "_source": {"content": "Page 2", "page_num": 2, "doc_id": "doc", "page_count": 2}},
-                {"_id": "doc__p1", "_score": 1.0, "_source": {"content": "Page 1", "page_num": 1, "doc_id": "doc", "page_count": 2}},
+                {
+                    "_id": "doc__p2",
+                    "_score": 1.0,
+                    "_source": {
+                        "content": "Page 2",
+                        "page_num": 2,
+                        "doc_id": "doc",
+                        "page_count": 2,
+                    },
+                },
+                {
+                    "_id": "doc__p1",
+                    "_score": 1.0,
+                    "_source": {
+                        "content": "Page 1",
+                        "page_num": 1,
+                        "doc_id": "doc",
+                        "page_count": 2,
+                    },
+                },
             ),
         ]
         retriever._client = mock_client
@@ -689,10 +716,12 @@ def test_es_get_text_accepts_logical_doc_id_in_repl() -> None:
 
 def test_es_hybrid_search_in_repl() -> None:
     """es_hybrid_search() should be callable from the REPL."""
-    retriever = InMemoryRetriever({
-        "doc1": "The quick brown fox",
-        "doc2": "A lazy dog sleeps",
-    })
+    retriever = InMemoryRetriever(
+        {
+            "doc1": "The quick brown fox",
+            "doc2": "A lazy dog sleeps",
+        }
+    )
     adapter = FakeAdapter(
         script=[
             'results = es_hybrid_search("fox")\nprint(len(results))',
@@ -752,8 +781,8 @@ def test_es_find_pages_text_in_repl() -> None:
             (
                 'matches = es_find_pages("logical-doc-A", ["Importe neto de la cifra de negocios"])\n'
                 'text = es_find_pages_text("logical-doc-A", ["Importe neto de la cifra de negocios"])\n'
-                'print(matches)\n'
-                'print(text)'
+                "print(matches)\n"
+                "print(text)"
             ),
             "FINAL_VAR: matches",
         ]
@@ -816,7 +845,9 @@ def test_empty_retrieval_context_bootstraps_prompt() -> None:
     initial_user_msg = next(m for m in adapter.call_log[0] if m["role"] == "user")["content"]
     assert "Total length: 0 chars" in initial_user_msg
     assert "Number of documents: 0" in initial_user_msg
-    assert "current context is empty because no documents have been retrieved yet" in initial_user_msg
+    assert (
+        "current context is empty because no documents have been retrieved yet" in initial_user_msg
+    )
     assert "es_hybrid_search()" in initial_user_msg
 
 
@@ -869,10 +900,12 @@ def test_system_prompt_excludes_retrieval_docs_without_retriever() -> None:
 
 def test_retrieval_with_llm_query_integration() -> None:
     """The model can combine es_search with llm_query for deep analysis."""
-    retriever = InMemoryRetriever({
-        "doc1": "Contract signed by Alice on Jan 1",
-        "doc2": "Contract signed by Bob on Feb 2",
-    })
+    retriever = InMemoryRetriever(
+        {
+            "doc1": "Contract signed by Alice on Jan 1",
+            "doc2": "Contract signed by Bob on Feb 2",
+        }
+    )
 
     adapter = FakeAdapter(
         script=[
@@ -881,7 +914,7 @@ def test_retrieval_with_llm_query_integration() -> None:
                 'docs = [es_get(r["doc_id"]) for r in results]\n'
                 'texts = [d["content"] for d in docs]\n'
                 'summary = llm_query("Who signed? " + " | ".join(texts))\n'
-                'answer = summary'
+                "answer = summary"
             ),
             "FINAL_VAR: answer",
         ]
@@ -991,10 +1024,7 @@ class TestAdvancedFiltersInSearch:
         call_body = mock_client.search.call_args[1]["body"]
         knn_filter = call_body["knn"]["filter"]["bool"]
         assert "filter" in knn_filter
-        assert any(
-            c.get("term", {}).get("status") == "published"
-            for c in knn_filter["filter"]
-        )
+        assert any(c.get("term", {}).get("status") == "published" for c in knn_filter["filter"])
 
     def test_must_not_in_knn_pre_filtering(self) -> None:
         retriever = _make_es_retriever()

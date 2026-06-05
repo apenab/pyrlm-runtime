@@ -189,10 +189,12 @@ class TestGenericChatAdapterComplete:
 
     def test_preserves_finish_reason_meta_for_empty_length_response(self) -> None:
         body = {
-            "choices": [{
-                "message": {"content": None, "reasoning_content": "internal"},
-                "finish_reason": "length",
-            }],
+            "choices": [
+                {
+                    "message": {"content": None, "reasoning_content": "internal"},
+                    "finish_reason": "length",
+                }
+            ],
             "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
         }
         resp = httpx.Response(200, json=body)
@@ -241,13 +243,16 @@ class TestGenericChatAdapterComplete:
             nonlocal call_count
             call_count += 1
             if call_count < 2:
-                return httpx.Response(429, json={"error": "rate_limit"},
-                                       headers={"Retry-After": "42"})
+                return httpx.Response(
+                    429, json={"error": "rate_limit"}, headers={"Retry-After": "42"}
+                )
             return _ok_response()
 
         adapter = GenericChatAdapter(
-            endpoint="http://x", max_retries=3,
-            retry_base_delay=1.0, retry_max_delay=5.0,
+            endpoint="http://x",
+            max_retries=3,
+            retry_base_delay=1.0,
+            retry_max_delay=5.0,
         )
         adapter._client = httpx.Client(transport=httpx.MockTransport(handler))
         adapter._wait = lambda s: waits.append(s)  # type: ignore[assignment]
@@ -267,8 +272,7 @@ class TestGenericChatAdapterComplete:
 
         def handler(_: httpx.Request) -> httpx.Response:
             if not waits:
-                return httpx.Response(429, json={"error": "x"},
-                                       headers={"Retry-After": "999999"})
+                return httpx.Response(429, json={"error": "x"}, headers={"Retry-After": "999999"})
             return _ok_response()
 
         adapter = GenericChatAdapter(endpoint="http://x", max_retries=2)
@@ -442,15 +446,17 @@ class TestGenericChatAdapterComplete:
 
     def test_list_content_parsed_and_meta_populated(self) -> None:
         body = {
-            "choices": [{
-                "message": {
-                    "content": [
-                        {"type": "output_text", "text": "hello"},
-                        {"type": "output_text", "text": "world"},
-                    ],
-                },
-                "finish_reason": "length",
-            }],
+            "choices": [
+                {
+                    "message": {
+                        "content": [
+                            {"type": "output_text", "text": "hello"},
+                            {"type": "output_text", "text": "world"},
+                        ],
+                    },
+                    "finish_reason": "length",
+                }
+            ],
             "usage": {"prompt_tokens": 5, "completion_tokens": 4, "total_tokens": 9},
         }
         resp = httpx.Response(200, json=body)
@@ -468,10 +474,12 @@ class TestGenericChatAdapterComplete:
 
     def test_empty_list_content_produces_empty_text(self) -> None:
         body = {
-            "choices": [{
-                "message": {"content": []},
-                "finish_reason": "length",
-            }],
+            "choices": [
+                {
+                    "message": {"content": []},
+                    "finish_reason": "length",
+                }
+            ],
             "usage": {"prompt_tokens": 5, "completion_tokens": 0, "total_tokens": 5},
         }
         resp = httpx.Response(200, json=body)

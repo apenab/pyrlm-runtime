@@ -274,9 +274,7 @@ def test_tournament_rerank_two_rounds() -> None:
     n_calls_expected = 4
     perm = " > ".join(f"[{i + 1}]" for i in range(10))
     adapter = FakeAdapter(script=[perm] * n_calls_expected)
-    reranker = TournamentReranker(
-        adapter, batch_size=10, top_k_per_batch=2, shuffle_seed=42
-    )
+    reranker = TournamentReranker(adapter, batch_size=10, top_k_per_batch=2, shuffle_seed=42)
     candidates = _make_candidates(30)
     out = reranker.rerank("q", candidates, top_k=10)
     assert len(out) == 10

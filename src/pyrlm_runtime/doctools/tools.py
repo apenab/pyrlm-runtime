@@ -53,9 +53,7 @@ def _fmt_doc(doc: DocInfo, index: int, labels: dict[str, str]) -> str:
     )
 
 
-def _resolve_doc(
-    path_or_id: str, index_store: DocIndexStoreProtocol
-) -> DocInfo | None:
+def _resolve_doc(path_or_id: str, index_store: DocIndexStoreProtocol) -> DocInfo | None:
     doc = index_store.get_by_path(path_or_id)
     if doc is None:
         doc = index_store.get(path_or_id)
@@ -192,7 +190,11 @@ def create_doc_tools(
 
             combined = "\n\n".join(parts)
             if len(combined) > max_chars:
-                combined = combined[:max_chars] + "\n\n" + lbl["truncated"].format(count=len(combined) - max_chars)
+                combined = (
+                    combined[:max_chars]
+                    + "\n\n"
+                    + lbl["truncated"].format(count=len(combined) - max_chars)
+                )
             return combined
 
         except (MaxPDFsExceeded, MaxPagesExceeded) as exc:
@@ -262,7 +264,7 @@ def create_doc_tools(
                 cl = content.lower()
                 idx = cl.find(ql)
                 if idx != -1:
-                    snippet = content[max(0, idx - 100): idx + 300]
+                    snippet = content[max(0, idx - 100) : idx + 300]
                     hits.append((p, snippet))
                 if len(hits) >= top_k:
                     break
@@ -270,7 +272,9 @@ def create_doc_tools(
             if not hits:
                 return lbl["not_found_in_cache"].format(query=query, title=doc.title)
 
-            lines = [lbl["found_in_doc"].format(query=query, title=doc.title, count=len(hits)) + "\n"]
+            lines = [
+                lbl["found_in_doc"].format(query=query, title=doc.title, count=len(hits)) + "\n"
+            ]
             for p, snippet in hits:
                 lines.append(f"--- Page {p + 1} ---\n...{snippet}...")
             return "\n".join(lines)

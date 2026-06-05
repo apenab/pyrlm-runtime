@@ -214,9 +214,8 @@ def _is_rrf_license_error(exc: Exception) -> bool:
 
 def _is_id_sort_fielddata_error(exc: Exception) -> bool:
     text = str(exc).lower()
-    return (
-        "fielddata access on the _id field is disallowed" in text
-        or ("_id field" in text and "fielddata" in text and "disallowed" in text)
+    return "fielddata access on the _id field is disallowed" in text or (
+        "_id field" in text and "fielddata" in text and "disallowed" in text
     )
 
 
@@ -238,11 +237,7 @@ def _logical_doc_search_body(
     if include_id_sort:
         sort.append({"_id": {"order": "asc"}})
     return {
-        "query": {
-            "bool": {
-                "filter": filters
-            }
-        },
+        "query": {"bool": {"filter": filters}},
         "sort": sort,
         "size": max_pages,
         "_source": True,  # full source needed for page stitching
@@ -330,9 +325,7 @@ def _stitch_logical_document(
 
     ordered_hits = sorted(hits, key=_page_sort_key)
     first_source = ordered_hits[0].get("_source", {})
-    metadata = {
-        k: v for k, v in first_source.items() if k not in {content_field, vector_field}
-    }
+    metadata = {k: v for k, v in first_source.items() if k not in {content_field, vector_field}}
     metadata["doc_id"] = logical_doc_id
     expected_page_count = metadata.get("page_count")
     if not isinstance(expected_page_count, int) or expected_page_count <= 0:
@@ -686,10 +679,12 @@ class ElasticsearchRetriever:
             class _ProxyNode(RequestsHttpNode):
                 def __init__(self_node, config: Any) -> None:
                     super().__init__(config)
-                    self_node.session.proxies.update({
-                        "http": proxy_url,
-                        "https": proxy_url,
-                    })
+                    self_node.session.proxies.update(
+                        {
+                            "http": proxy_url,
+                            "https": proxy_url,
+                        }
+                    )
 
             kwargs["node_class"] = _ProxyNode
             kwargs["verify_certs"] = False
@@ -754,9 +749,7 @@ class ElasticsearchRetriever:
         Results are cached in the LRU embedding cache when enabled.
         """
         if not self.embedding_model:
-            raise ValueError(
-                "embedding_model must be set to use vector_search or hybrid_search"
-            )
+            raise ValueError("embedding_model must be set to use vector_search or hybrid_search")
 
         # Check embedding cache
         if self._embedding_cache is not None:
@@ -1254,9 +1247,7 @@ class AsyncElasticsearchRetriever:
     async def _embed(self, text: str) -> list[float]:
         """Embed *text* via an OpenAI-compatible ``/embeddings`` endpoint (async)."""
         if not self.embedding_model:
-            raise ValueError(
-                "embedding_model must be set to use vector_search or hybrid_search"
-            )
+            raise ValueError("embedding_model must be set to use vector_search or hybrid_search")
 
         # Check embedding cache
         if self._embedding_cache is not None:

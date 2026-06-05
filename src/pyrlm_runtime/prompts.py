@@ -268,6 +268,7 @@ def build_system_prompt(
         prompt += RETRIEVAL_SYSTEM_PROMPT_SUPPLEMENT
     if doc_tools_available:
         from pyrlm_runtime.doctools.prompts import DOC_TOOLS_PROMPT_SUPPLEMENT
+
         prompt += DOC_TOOLS_PROMPT_SUPPLEMENT
     return prompt
 
@@ -372,14 +373,12 @@ def build_iteration_message(
     error = _truncate_feedback(last_error, 1200)
     state_summary = _truncate_feedback(last_state_summary, 1800)
 
-    repl_block = (
-        f"[REPL Result]\nstdout:\n{stdout}\n\nerror:\n{error}\n\nstate:\n{state_summary}"
-    )
+    repl_block = f"[REPL Result]\nstdout:\n{stdout}\n\nerror:\n{error}\n\nstate:\n{state_summary}"
 
     if root_query:
         return (
             f"{repl_block}\n\n"
-            f'The history above is your previous interactions with the REPL environment. '
+            f"The history above is your previous interactions with the REPL environment. "
             f"Continue using the REPL and sub-LLMs to answer the original query:\n"
             f'"{root_query}"\n\n'
             f"Step: {step}/{max_steps}. Your next action:"
