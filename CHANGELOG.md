@@ -1,3 +1,19 @@
+## v1.0.1 (2026-06-05)
+
+### BREAKING CHANGE
+
+- RLM fields `max_tokens` and `subcall_max_tokens` are
+renamed to `max_output_tokens` and `subcall_max_output_tokens`.
+
+### Feat
+
+- **rlm**: rename max_tokens to max_output_tokens and raise defaults
+- **compaction**: auto-resolve context window for pct threshold; deprecate max_history_tokens
+
+### Refactor
+
+- improve documentation and clarity in README, policy, prompts, and tests
+
 ## v1.0.0 (2026-06-04)
 
 ### Feat
