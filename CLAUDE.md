@@ -58,6 +58,21 @@ tests/
 
 When fixing a bug or correcting a behavior, always add a regression test that would fail if the bug were reintroduced. Propose the test proactively without waiting for the user to ask.
 
+## Documentation rule
+
+When a change adds, renames, deprecates, or alters the behavior of any public
+interface (an `RLM` / `Policy` field, an adapter argument, a REPL function, a
+doc tool, a retrieval method) or a user-facing default, update the relevant
+documentation **in the same change, proactively, without waiting for the user
+to ask**. This means at minimum:
+
+- The **README** (quick-reference parameter lists, dedicated sections, code
+  examples) wherever the changed symbol or behavior appears.
+- The **docstring / inline comment** on the field or function itself.
+
+Treat docs as part of the change's definition of done, alongside tests. A change
+that ships code without its doc update is incomplete.
+
 ## REPL backends
 
 Two interchangeable backends via `REPLProtocol`:
