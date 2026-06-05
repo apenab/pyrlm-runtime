@@ -542,8 +542,7 @@ class RLM:
         repl.set("lenP", lenp)
 
         # Compaction history: persistent trajectory log accessible from the REPL
-        # as `history`.  Mirrors alexzhang13/rlm's append_compaction_entry pattern
-        # so that, after a compaction collapses the message stream into a short
+        # as `history`. After a compaction collapses the message stream into a short
         # summary, the model can still recover earlier turns by inspecting
         # `history` from the REPL.  Only populated when compaction is enabled.
         compaction_history: list[Any] = []

@@ -286,8 +286,8 @@ class PythonREPL:
     def show_vars(self) -> str:
         """Return user-defined variables, excluding scaffold and built-ins.
 
-        Mirrors original alexzhang13/rlm's SHOW_VARS() so the model can
-        inspect what it has created before calling FINAL_VAR:.
+        Return user-defined variables so the model can inspect what it has
+        created before calling FINAL_VAR:.
         """
         scaffold: set[str] = getattr(self, "_scaffold_names", set())
         skip = {"__builtins__", "__name__"} | scaffold

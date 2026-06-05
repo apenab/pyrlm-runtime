@@ -378,8 +378,7 @@ policy = Policy(
 rlm = RLM(adapter=adapter, policy=policy)
 ```
 
-By default there is **no token budget** (`max_total_tokens=None`), matching
-[alexzhang13/rlm](https://github.com/alexzhang13/rlm)'s `max_tokens=None`: a run is bounded by
+By default there is **no token budget** (`max_total_tokens=None`): a run is bounded by
 `max_steps` / `max_subcalls` and terminates with a **graceful finalization** (the model is asked
 for a best final answer from what it has gathered). Set `max_total_tokens` to an integer only if
 you want a hard token ceiling — when it is hit the run also finalizes gracefully, just earlier

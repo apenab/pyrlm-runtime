@@ -12,7 +12,7 @@ from pyrlm_runtime.policy import (
 
 
 def test_default_token_budget_is_unlimited() -> None:
-    """Matches alexzhang13/rlm's `max_tokens=None` default: no token budget unless set.
+    """Default Policy has no token budget: no token budget unless set.
 
     With the default Policy, add_tokens / add_subcall_tokens never raise MaxTokensExceeded,
     so a run is bounded by max_steps / max_subcalls and finalizes gracefully instead of

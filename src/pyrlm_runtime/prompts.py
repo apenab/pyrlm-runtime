@@ -310,10 +310,9 @@ def build_root_user_message(
         context_info_lines.append(f"Document lengths: {lengths_str}")
     context_info = "\n".join(context_info_lines) + "\n"
 
-    # Iteration-0 safeguard: mirrors original alexzhang13/rlm's approach of
-    # telling the model it hasn't seen the context yet so it doesn't skip
-    # straight to a final answer before exploring. Kept context-agnostic so
-    # it works for self-contained queries (no context) too.
+    # Iteration-0 safeguard: tell the model it hasn't seen the context yet so
+    # it doesn't skip straight to a final answer before exploring. Kept
+    # context-agnostic so it works for self-contained queries (no context) too.
     if step == 1 and not repl_executed:
         if retriever_available and context_len == 0:
             safeguard = (
@@ -362,7 +361,7 @@ def build_iteration_message(
 
       * the latest REPL execution result (stdout/error/state)
       * a re-injection of the original query (anti-drift in long loops —
-        mirrors alexzhang13/rlm's USER_PROMPT_WITH_ROOT pattern)
+        re-injection of the original query (anti-drift in long loops)
       * the step counter
 
     Pass ``root_query`` to enable the anti-drift re-injection.  Leaving it

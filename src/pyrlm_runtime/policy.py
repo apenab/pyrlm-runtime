@@ -29,9 +29,9 @@ class Policy:
     max_steps: int = 40
     max_subcalls: int = 200
     max_recursion_depth: int = 1
-    # Total token budget (root + subcalls). None = unlimited, matching alexzhang13/rlm's
-    # `max_tokens=None` default. When None, the run is bounded by max_steps / max_subcalls
-    # and terminates with a graceful finalization rather than a MaxTokensExceeded abort.
+    # Total token budget (root + subcalls). None = unlimited. When None, the run is bounded
+    # by max_steps / max_subcalls and terminates with a graceful finalization rather than a
+    # MaxTokensExceeded abort.
     max_total_tokens: int | None = None
     max_subcall_tokens: int | None = None
     steps: int = 0
@@ -154,7 +154,7 @@ def estimate_tokens(text: str) -> int:
 
 # ---------------------------------------------------------------------------
 # Accurate token counting (tiktoken-based, with len//4 fallback)
-# Port of alexzhang13/rlm's token_utils.py, adapted for pyrlm-runtime.
+# Accurate token counting: tiktoken-based with len//4 fallback.
 # ---------------------------------------------------------------------------
 
 _DEFAULT_CONTEXT_LIMIT = 128_000

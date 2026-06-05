@@ -27,7 +27,7 @@ def test_syntax_error_includes_line_detail_and_hint_for_large_blocks() -> None:
 
 
 # ---------------------------------------------------------------------------
-# show_vars and restore_names — mirrors original alexzhang13/rlm design
+# show_vars and restore_names
 # ---------------------------------------------------------------------------
 
 
