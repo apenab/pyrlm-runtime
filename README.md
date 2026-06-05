@@ -227,7 +227,9 @@ rlm = RLM(
 
     # Conversation history
     conversation_history=True,          # Multi-turn mode (default: True)
-    max_history_tokens=0,               # Token budget for history (0=unlimited)
+    compaction=False,                   # Off by default; summarizes old turns when enabled
+    compaction_threshold_pct=0.0,       # Trigger at pct of model context window (e.g. 0.85)
+    max_history_tokens=0,               # DEPRECATED: blunt history trim (0=disabled)
 
     # Retrieval
     retriever=None,                     # RetrieverProtocol impl (e.g. ElasticsearchRetriever)
@@ -802,7 +804,6 @@ By default (`conversation_history=True`), the LLM sees its previous code attempt
 rlm = RLM(
     adapter=adapter,
     conversation_history=True,      # Default
-    max_history_tokens=4000,        # Optional token budget (0=unlimited)
 )
 ```
 
@@ -810,7 +811,38 @@ rlm = RLM(
 
 1. The initial message contains full query + context metadata
 2. Each iteration appends a lightweight message with REPL results
-3. Token trimming (if configured) always preserves system + initial user message, dropping oldest middle turns
+
+### Keeping history within the context window
+
+Most runs need none of this: in an RLM the large context lives in the REPL (the
+model inspects it with code), not in the prompt, so the conversation history is
+just code plus truncated REPL output and rarely approaches the context window.
+Both mechanisms below default to **off** — turn one on only for unusually long
+trajectories. When you do need to manage history, **compaction is preferred over
+`max_history_tokens`**:
+
+| Mechanism | What it does | Cost |
+| --- | --- | --- |
+| `compaction=True` | Summarizes old turns into a running summary; keeps a recoverable `history` REPL variable | One extra LLM call per compaction; preserves the gist |
+| `max_history_tokens=N` (**deprecated**) | Blunt trim: drops the oldest middle turns outright | Free, no extra call; **discards information** |
+
+Compaction triggers when the estimated history size crosses a threshold. Set the
+threshold as a fraction of the model's context window with `compaction_threshold_pct`
+(e.g. `0.85`) — the window is auto-resolved from the adapter's model id (or set
+`compaction_model_name` / `compaction_model_context_limit` explicitly). Token counting
+uses tiktoken when available, falling back to a `len // 4` estimate.
+
+```python
+rlm = RLM(
+    adapter=adapter,
+    compaction=True,
+    compaction_threshold_pct=0.85,  # compact at 85% of the model's context window
+)
+```
+
+Alternatively, set `compaction_threshold_tokens` for an absolute trigger. `max_history_tokens`
+still works as a cheap, no-extra-LLM-call fallback but emits a `DeprecationWarning`; prefer
+compaction, which summarizes rather than discards.
 
 ## Guard Mechanisms & Fallbacks
 

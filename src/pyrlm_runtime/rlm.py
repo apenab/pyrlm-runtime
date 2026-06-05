@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import threading
 import time
+import warnings
 from typing import Any
 from .adapters.base import ModelAdapter
 from .cache import CacheRecord, FileCache
@@ -99,7 +100,6 @@ def _normalize_patterns(patterns: str | list[str] | tuple[str, ...]) -> list[str
     return []
 
 
-
 def _loose_text(text: str, *, case_sensitive: bool) -> str:
     normalized = re.sub(r"[\W_]+", " ", text)
     normalized = re.sub(r"\s+", " ", normalized).strip()
@@ -148,7 +148,9 @@ def _find_pages_in_paged_text(
         for pattern in normalized_patterns:
             if regex:
                 compiled = next(
-                    compiled for raw_pattern, compiled in compiled_patterns if raw_pattern == pattern
+                    compiled
+                    for raw_pattern, compiled in compiled_patterns
+                    if raw_pattern == pattern
                 )
                 match = compiled.search(page_text)
                 if match is None:
@@ -189,7 +191,6 @@ def _find_pages_in_paged_text(
     return results
 
 
-
 def _split_subcall_text(text: str) -> tuple[str, str]:
     """Split subcall text into ``(query, snippet)``.
 
@@ -200,10 +201,10 @@ def _split_subcall_text(text: str) -> tuple[str, str]:
     """
     if text.startswith(SUBCALL_QUESTION_PREFIX):
         head, _, rest = text.partition("\n")
-        query = head[len(SUBCALL_QUESTION_PREFIX):].strip()
+        query = head[len(SUBCALL_QUESTION_PREFIX) :].strip()
         snippet = rest
         if snippet.startswith(SUBCALL_SNIPPET_PREFIX):
-            snippet = snippet[len(SUBCALL_SNIPPET_PREFIX):].lstrip("\n")
+            snippet = snippet[len(SUBCALL_SNIPPET_PREFIX) :].lstrip("\n")
         return (query or SUBCALL_FALLBACK_QUERY, snippet)
     return (SUBCALL_FALLBACK_QUERY, text)
 
@@ -300,7 +301,11 @@ class RLM:
     # When True the LLM sees all previous assistant responses and REPL
     # results, enabling self-correction across iterations.
     conversation_history: bool = True
-    # Maximum estimated tokens for conversation history (0 = unlimited).
+    # DEPRECATED — prefer ``compaction``.  Hard trim of the conversation history
+    # to this many estimated tokens before each root call (0 = disabled).  This
+    # drops the oldest middle turns outright, discarding information; compaction
+    # summarizes them instead and keeps a recoverable ``history`` log.  Kept as a
+    # cheap, no-extra-LLM-call fallback; emits a DeprecationWarning when > 0.
     max_history_tokens: int = 0
     # Paper-aligned: compaction. When True, the root conversation history is
     # summarized once it exceeds ``compaction_threshold_tokens`` estimated
@@ -361,6 +366,15 @@ class RLM:
                 "compaction=True requires conversation_history=True "
                 "(compaction summarizes the multi-turn history)."
             )
+        if self.max_history_tokens > 0:
+            warnings.warn(
+                "max_history_tokens is deprecated; prefer compaction=True, which "
+                "summarizes old turns instead of dropping them and keeps a "
+                "recoverable `history` log. max_history_tokens still works as a "
+                "cheap no-extra-LLM-call fallback.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
     def _create_repl(self) -> REPLProtocol:
         if self.repl_backend == "python":
@@ -373,11 +387,30 @@ class RLM:
             f"Invalid repl_backend={self.repl_backend!r}. Expected 'python' or 'monty'."
         )
 
+    def _effective_compaction_model_name(self) -> str:
+        """Model name for tiktoken counting and context-limit resolution.
+
+        Prefers the explicit ``compaction_model_name``; otherwise falls back to
+        the adapter's model identifier (``model`` / ``model_name`` / ``model_id``)
+        so that setting only ``compaction_threshold_pct`` works out of the box —
+        mirrors rlm, which always knows its backend model. Returns "" when no
+        name is available, in which case token counting uses the len//4 fallback.
+        """
+        if self.compaction_model_name:
+            return self.compaction_model_name
+        for attr in ("model", "model_name", "model_id"):
+            name = getattr(self.adapter, attr, None)
+            if isinstance(name, str) and name:
+                return name
+        return ""
+
     def _compaction_threshold_effective(self) -> int:
         if self.compaction_threshold_pct > 0.0:
             limit = self.compaction_model_context_limit
-            if limit <= 0 and self.compaction_model_name:
-                limit = get_context_limit(self.compaction_model_name)
+            if limit <= 0:
+                model_name = self._effective_compaction_model_name()
+                if model_name:
+                    limit = get_context_limit(model_name)
             if limit > 0:
                 return int(self.compaction_threshold_pct * limit)
         return self.compaction_threshold_tokens
@@ -703,9 +736,7 @@ class RLM:
                             auto_finalize_var=None,
                             fallback_code=None,
                         )
-                        result_text, sub_trace = child.run(
-                            query_text, Context.from_text(snippet)
-                        )
+                        result_text, sub_trace = child.run(query_text, Context.from_text(snippet))
                         # Roll the child subtree's subcall count up into the parent.
                         policy.account_subtree(subcalls=child_policy.subcalls)
                 except (MaxSubcallsExceeded, MaxTokensExceeded) as exc:
@@ -723,9 +754,7 @@ class RLM:
                         policy.account_subtree(subcalls=child_policy.subcalls)
                     if reserved_tokens > 0:
                         policy.release_subcall_tokens(reserved_tokens)
-                    logger.warning(
-                        "Recursive child exhausted budget at depth=%s: %s", depth, exc
-                    )
+                    logger.warning("Recursive child exhausted budget at depth=%s: %s", depth, exc)
                     from .adapters.base import Usage
 
                     spent = child_policy.total_tokens if child_policy is not None else 0
@@ -739,13 +768,9 @@ class RLM:
                             step_id=next_step_id(),
                             kind="recursive_subcall",
                             depth=depth,
-                            prompt_summary=_truncate(
-                                text, self.log_truncate_prompt_summary
-                            ),
+                            prompt_summary=_truncate(text, self.log_truncate_prompt_summary),
                             output=_truncate(result_text, self.log_truncate_output),
-                            usage=Usage(
-                                prompt_tokens=0, completion_tokens=0, total_tokens=spent
-                            ),
+                            usage=Usage(prompt_tokens=0, completion_tokens=0, total_tokens=spent),
                             error=str(exc),
                             elapsed=time.perf_counter() - subcall_started,
                             cache_hit=False,
@@ -1018,7 +1043,9 @@ class RLM:
             group_id = next_parallel_group_id()
 
             def _estimate_subcall_token_budget(prompt: str) -> int:
-                prompt_budget = estimate_tokens(self.subcall_system_prompt) + estimate_tokens(prompt)
+                prompt_budget = estimate_tokens(self.subcall_system_prompt) + estimate_tokens(
+                    prompt
+                )
                 return prompt_budget + max_tokens
 
             def _process_one(idx: int, prompt: str) -> tuple[int, str]:
@@ -1034,7 +1061,7 @@ class RLM:
                         parallel_index=idx,
                         parallel_total=len(unique_prompts),
                         reserved_tokens=reserved_tokens,
-                    )
+                    ),
                 )
 
             max_workers = min(self.max_concurrent_subcalls, len(unique_prompts))
@@ -1061,9 +1088,7 @@ class RLM:
             if len(lines) < 2:
                 return stripped
             # Find first closing fence — handles trailing text after the block.
-            close_idx = next(
-                (i for i in range(1, len(lines)) if lines[i].strip() == "```"), None
-            )
+            close_idx = next((i for i in range(1, len(lines)) if lines[i].strip() == "```"), None)
             if close_idx is not None:
                 return "\n".join(lines[1:close_idx]).strip()
             return stripped
@@ -1071,7 +1096,10 @@ class RLM:
         def _parse_jsonish_response(text: str) -> Any:
             stripped = _strip_markdown_fences(text)
             candidates: list[str] = []
-            for candidate in (stripped, stripped.split(":", 1)[1].strip() if ":" in stripped else ""):
+            for candidate in (
+                stripped,
+                stripped.split(":", 1)[1].strip() if ":" in stripped else "",
+            ):
                 if candidate and candidate not in candidates:
                     candidates.append(candidate)
             for opener, closer in (("{", "}"), ("[", "]")):
@@ -1333,10 +1361,12 @@ class RLM:
                     logical_doc_id = None
                     if isinstance(metadata, dict):
                         logical_doc_id = metadata.get("doc_id")
-                    sample.append({
-                        "page_doc_id": item.get("page_doc_id") or item.get("doc_id"),
-                        "logical_doc_id": item.get("logical_doc_id") or logical_doc_id,
-                    })
+                    sample.append(
+                        {
+                            "page_doc_id": item.get("page_doc_id") or item.get("doc_id"),
+                            "logical_doc_id": item.get("logical_doc_id") or logical_doc_id,
+                        }
+                    )
                 log_diag("search_result_schema", {"method": method, "sample": sample})
 
             def _collapse_doc_results(results: Any, *, top_k: int) -> list[dict[str, Any]]:
@@ -1376,34 +1406,52 @@ class RLM:
                 return collapsed[:top_k]
 
             def es_search(
-                query: str, top_k: int = 10, filters: dict | None = None,
+                query: str,
+                top_k: int = 10,
+                filters: dict | None = None,
                 deduplicate_by_doc: bool = False,
             ) -> list[dict]:
                 results = _normalize_search_results(
-                    _retriever.search(query, top_k=top_k if not deduplicate_by_doc else top_k * 8, filters=filters)
+                    _retriever.search(
+                        query, top_k=top_k if not deduplicate_by_doc else top_k * 8, filters=filters
+                    )
                 )
                 _log_search_result_schema("es_search", results)
-                return _collapse_doc_results(results, top_k=top_k) if deduplicate_by_doc else results
+                return (
+                    _collapse_doc_results(results, top_k=top_k) if deduplicate_by_doc else results
+                )
 
             def es_vector_search(
-                query: str, top_k: int = 10, filters: dict | None = None,
+                query: str,
+                top_k: int = 10,
+                filters: dict | None = None,
                 deduplicate_by_doc: bool = False,
             ) -> list[dict]:
                 results = _normalize_search_results(
-                    _retriever.vector_search(query, top_k=top_k if not deduplicate_by_doc else top_k * 8, filters=filters)
+                    _retriever.vector_search(
+                        query, top_k=top_k if not deduplicate_by_doc else top_k * 8, filters=filters
+                    )
                 )
                 _log_search_result_schema("es_vector_search", results)
-                return _collapse_doc_results(results, top_k=top_k) if deduplicate_by_doc else results
+                return (
+                    _collapse_doc_results(results, top_k=top_k) if deduplicate_by_doc else results
+                )
 
             def es_hybrid_search(
-                query: str, top_k: int = 10, filters: dict | None = None,
+                query: str,
+                top_k: int = 10,
+                filters: dict | None = None,
                 deduplicate_by_doc: bool = False,
             ) -> list[dict]:
                 results = _normalize_search_results(
-                    _retriever.hybrid_search(query, top_k=top_k if not deduplicate_by_doc else top_k * 8, filters=filters)
+                    _retriever.hybrid_search(
+                        query, top_k=top_k if not deduplicate_by_doc else top_k * 8, filters=filters
+                    )
                 )
                 _log_search_result_schema("es_hybrid_search", results)
-                return _collapse_doc_results(results, top_k=top_k) if deduplicate_by_doc else results
+                return (
+                    _collapse_doc_results(results, top_k=top_k) if deduplicate_by_doc else results
+                )
 
             def es_hybrid_doc_search(
                 query: str,
@@ -1511,7 +1559,11 @@ class RLM:
                 expected = metadata.get("expected_page_count")
                 if not isinstance(expected, int) or expected <= 0:
                     fallback_expected = metadata.get("page_count")
-                    expected = fallback_expected if isinstance(fallback_expected, int) and fallback_expected > 0 else None
+                    expected = (
+                        fallback_expected
+                        if isinstance(fallback_expected, int) and fallback_expected > 0
+                        else None
+                    )
                 indexed = metadata.get("indexed_source_page_count")
                 if not isinstance(indexed, int) or indexed < 0:
                     indexed = metadata.get("indexed_page_count")
@@ -1585,12 +1637,15 @@ class RLM:
                 page_doc_ids = metadata.get("page_doc_ids")
                 pages = _split_paged_text(content)
                 page_doc_id_by_page: dict[int, str] = {}
-                if (
-                    isinstance(page_doc_ids, list)
-                    and len(page_doc_ids) == len(pages)
-                ):
-                    for (page_num, _page_text), page_doc_id in zip(pages, page_doc_ids, strict=False):
-                        if isinstance(page_num, int) and isinstance(page_doc_id, str) and page_doc_id:
+                if isinstance(page_doc_ids, list) and len(page_doc_ids) == len(pages):
+                    for (page_num, _page_text), page_doc_id in zip(
+                        pages, page_doc_ids, strict=False
+                    ):
+                        if (
+                            isinstance(page_num, int)
+                            and isinstance(page_doc_id, str)
+                            and page_doc_id
+                        ):
                             page_doc_id_by_page[page_num] = page_doc_id
                 for item in matches:
                     page_num = item.get("page_num")
@@ -1665,12 +1720,15 @@ class RLM:
         # -- REPL extensions (domain-specific functions from downstream) ----
         _extension_fns: dict[str, Any] = {}
         if callable(self.repl_extensions):
-            _extension_fns = self.repl_extensions(
-                rlm=self,
-                repl=repl,
-                retriever=self.retriever,
-                log_diag=log_diag,
-            ) or {}
+            _extension_fns = (
+                self.repl_extensions(
+                    rlm=self,
+                    repl=repl,
+                    retriever=self.retriever,
+                    log_diag=log_diag,
+                )
+                or {}
+            )
             for name, fn in _extension_fns.items():
                 repl.set(name, fn)
 
@@ -1907,9 +1965,13 @@ class RLM:
             if result.error:
                 logger.debug("fallback error=%s", result.error)
             if result.stdout:
-                logger.debug("fallback stdout=%s", _truncate(result.stdout, self.log_truncate_output))
+                logger.debug(
+                    "fallback stdout=%s", _truncate(result.stdout, self.log_truncate_output)
+                )
             if last_state_summary:
-                logger.debug("fallback state=%s", _truncate(last_state_summary, self.log_truncate_output))
+                logger.debug(
+                    "fallback state=%s", _truncate(last_state_summary, self.log_truncate_output)
+                )
             add_step(
                 TraceStep(
                     step_id=next_step_id(),
@@ -2087,7 +2149,7 @@ class RLM:
                 # Compaction: summarize trajectory when over threshold, before any hard trim.
                 compaction_threshold = self._compaction_threshold_effective()
                 if self.compaction and compaction_threshold > 0:
-                    hist_tokens = count_tokens(history, self.compaction_model_name)
+                    hist_tokens = count_tokens(history, self._effective_compaction_model_name())
                     if hist_tokens >= compaction_threshold:
                         compact_started = time.perf_counter()
                         compacted, compaction_tokens = self._compact_history(
@@ -2243,9 +2305,13 @@ class RLM:
                     if result.error:
                         logger.debug("repl error=%s", result.error)
                     if result.stdout:
-                        logger.debug("repl stdout=%s", _truncate(result.stdout, self.log_truncate_output))
+                        logger.debug(
+                            "repl stdout=%s", _truncate(result.stdout, self.log_truncate_output)
+                        )
                     if last_state_summary:
-                        logger.debug("repl state=%s", _truncate(last_state_summary, self.log_truncate_output))
+                        logger.debug(
+                            "repl state=%s", _truncate(last_state_summary, self.log_truncate_output)
+                        )
                     add_step(
                         TraceStep(
                             step_id=next_step_id(),
@@ -2303,9 +2369,7 @@ class RLM:
             if self.conversation_history:
                 history.append({"role": "assistant", "content": response.text})
                 if self.compaction:
-                    compaction_history.append(
-                        {"role": "assistant", "content": response.text}
-                    )
+                    compaction_history.append({"role": "assistant", "content": response.text})
 
             # For trace, use the last user message as prompt summary
             prompt_summary = messages[-1]["content"] if messages else ""
@@ -2572,7 +2636,9 @@ class RLM:
             if result.stdout:
                 logger.debug("repl stdout=%s", _truncate(result.stdout, self.log_truncate_output))
             if last_state_summary:
-                logger.debug("repl state=%s", _truncate(last_state_summary, self.log_truncate_output))
+                logger.debug(
+                    "repl state=%s", _truncate(last_state_summary, self.log_truncate_output)
+                )
             add_step(
                 TraceStep(
                     step_id=next_step_id(),
@@ -2689,9 +2755,7 @@ def _extract_code(text: str) -> str:
         # Stop at the FIRST closing fence — ignore any subsequent blocks.
         # Taking up to the last ``` causes SyntaxErrors when the model emits
         # two consecutive code blocks in one response.
-        close_idx = next(
-            (i for i, line in enumerate(lines) if line.strip() == "```"), len(lines)
-        )
+        close_idx = next((i for i, line in enumerate(lines) if line.strip() == "```"), len(lines))
         lines = lines[:close_idx]
         if lines and lines[0].strip().lower() in {"python", "repl"}:
             lines = lines[1:]
@@ -2755,7 +2819,10 @@ def _looks_like_code(text: str) -> bool:
         return True
     if re.match(r"^P(?:\.|\[|\(|\s*=)", first):
         return True
-    if re.match(r"^(?:ask(?:_[A-Za-z0-9]+)?|llm_(?:query|batch)(?:_[A-Za-z0-9]+)?|extract_after|es_[A-Za-z0-9_]+|SHOW_VARS|peek|tail|lenP)\s*\(", first):
+    if re.match(
+        r"^(?:ask(?:_[A-Za-z0-9]+)?|llm_(?:query|batch)(?:_[A-Za-z0-9]+)?|extract_after|es_[A-Za-z0-9_]+|SHOW_VARS|peek|tail|lenP)\s*\(",
+        first,
+    ):
         return True
     return False
 

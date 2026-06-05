@@ -103,3 +103,73 @@ def test_compaction_summary_tokens_counted_in_policy() -> None:
         s.usage.total_tokens for s in trace.steps if s.kind == "root_call" and s.usage
     )
     assert policy.total_tokens >= root_tokens + summary_tokens
+
+
+# ---------------------------------------------------------------------------
+# Effective compaction model name / pct-threshold auto-resolution (#3)
+# ---------------------------------------------------------------------------
+
+
+def test_pct_threshold_resolves_limit_from_adapter_model() -> None:
+    """Regression: setting only compaction_threshold_pct resolves the context
+    window from the adapter's model (mirrors rlm), so the % threshold works
+    out of the box without an explicit compaction_model_name / context_limit."""
+    adapter = FakeAdapter(script=["FINAL: done"], model="gpt-4o")  # 128_000 window
+    rlm = RLM(
+        adapter=adapter,
+        compaction=True,
+        compaction_threshold_pct=0.85,
+        conversation_history=True,
+    )
+    assert rlm._effective_compaction_model_name() == "gpt-4o"
+    assert rlm._compaction_threshold_effective() == int(0.85 * 128_000)
+
+
+def test_explicit_compaction_model_name_wins_over_adapter() -> None:
+    """An explicit compaction_model_name takes precedence over the adapter's."""
+    adapter = FakeAdapter(script=["FINAL: done"], model="gpt-4o")
+    rlm = RLM(
+        adapter=adapter,
+        compaction=True,
+        compaction_threshold_pct=0.85,
+        compaction_model_name="claude-3-5-sonnet",  # 200_000 window
+        conversation_history=True,
+    )
+    assert rlm._effective_compaction_model_name() == "claude-3-5-sonnet"
+    assert rlm._compaction_threshold_effective() == int(0.85 * 200_000)
+
+
+def test_pct_threshold_falls_back_when_no_model_available() -> None:
+    """With no explicit name and an adapter exposing no model, the model name is
+    empty and the pct threshold (no resolvable limit) falls back to the absolute
+    compaction_threshold_tokens — preserving prior behavior."""
+    adapter = FakeAdapter(script=["FINAL: done"])  # no model attribute value
+    rlm = RLM(
+        adapter=adapter,
+        compaction=True,
+        compaction_threshold_pct=0.85,
+        compaction_threshold_tokens=12_345,
+        conversation_history=True,
+    )
+    assert rlm._effective_compaction_model_name() == ""
+    assert rlm._compaction_threshold_effective() == 12_345
+
+
+# ---------------------------------------------------------------------------
+# max_history_tokens deprecation (#2)
+# ---------------------------------------------------------------------------
+
+
+def test_max_history_tokens_emits_deprecation_warning() -> None:
+    """max_history_tokens > 0 still works but warns; compaction is the successor."""
+    with pytest.warns(DeprecationWarning, match="max_history_tokens"):
+        RLM(adapter=FakeAdapter(script=["FINAL: done"]), max_history_tokens=1000)
+
+
+def test_max_history_tokens_zero_does_not_warn() -> None:
+    """The default (disabled) path must not emit a spurious deprecation warning."""
+    import warnings as _warnings
+
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("error", DeprecationWarning)
+        RLM(adapter=FakeAdapter(script=["FINAL: done"]))  # max_history_tokens defaults to 0

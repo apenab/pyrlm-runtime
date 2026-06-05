@@ -40,7 +40,9 @@ class Policy:
     subcall_tokens: int = 0
     _reserved_total_tokens: int = field(default=0, init=False, repr=False, compare=False)
     _reserved_subcall_tokens: int = field(default=0, init=False, repr=False, compare=False)
-    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False, compare=False
+    )
 
     def check_step(self) -> None:
         with self._lock:
@@ -75,7 +77,10 @@ class Policy:
         with self._lock:
             if tokens <= 0:
                 return
-            if self.max_total_tokens is not None and self.total_tokens + tokens > self.max_total_tokens:
+            if (
+                self.max_total_tokens is not None
+                and self.total_tokens + tokens > self.max_total_tokens
+            ):
                 raise MaxTokensExceeded("max_total_tokens exceeded")
             self.total_tokens += tokens
 
@@ -102,7 +107,10 @@ class Policy:
             if self.max_subcall_tokens is not None:
                 if self.subcall_tokens + new_reserved_subcall_tokens > self.max_subcall_tokens:
                     raise MaxTokensExceeded("max_subcall_tokens exceeded")
-            if self.max_total_tokens is not None and self.total_tokens + new_reserved_total_tokens > self.max_total_tokens:
+            if (
+                self.max_total_tokens is not None
+                and self.total_tokens + new_reserved_total_tokens > self.max_total_tokens
+            ):
                 raise MaxTokensExceeded("max_total_tokens exceeded")
             self._reserved_subcall_tokens = new_reserved_subcall_tokens
             self._reserved_total_tokens = new_reserved_total_tokens
@@ -135,7 +143,10 @@ class Policy:
                     self._reserved_subcall_tokens = remaining_reserved_subcall_tokens
                     self._reserved_total_tokens = remaining_reserved_total_tokens
                     raise MaxTokensExceeded("max_subcall_tokens exceeded")
-            if self.max_total_tokens is not None and new_total_tokens + remaining_reserved_total_tokens > self.max_total_tokens:
+            if (
+                self.max_total_tokens is not None
+                and new_total_tokens + remaining_reserved_total_tokens > self.max_total_tokens
+            ):
                 self._reserved_subcall_tokens = remaining_reserved_subcall_tokens
                 self._reserved_total_tokens = remaining_reserved_total_tokens
                 raise MaxTokensExceeded("max_total_tokens exceeded")
@@ -154,7 +165,6 @@ def estimate_tokens(text: str) -> int:
 
 # ---------------------------------------------------------------------------
 # Accurate token counting (tiktoken-based, with len//4 fallback)
-# Accurate token counting: tiktoken-based with len//4 fallback.
 # ---------------------------------------------------------------------------
 
 _DEFAULT_CONTEXT_LIMIT = 128_000

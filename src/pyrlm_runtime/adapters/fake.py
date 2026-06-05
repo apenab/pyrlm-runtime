@@ -23,9 +23,11 @@ class FakeAdapter(ModelAdapter):
         *,
         rules: Iterable[FakeRule] | None = None,
         script: Iterable[str] | None = None,
+        model: str | None = None,
     ) -> None:
         self._rules = list(rules or [])
         self._script = list(script or [])
+        self.model = model
         self.call_log: list[list[dict[str, str]]] = []
 
     def add_rule(
