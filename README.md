@@ -75,7 +75,7 @@ export LLM_API_KEY="your-api-key-here"
 ```python
 from pathlib import Path
 
-from pyrlm_runtime import RLM, Context
+from pyrlm_runtime import RLM, Context, FileCache
 from pyrlm_runtime.adapters import OpenAICompatAdapter
 
 # Load a whole folder of Markdown docs as context — this can be hundreds of
@@ -90,6 +90,8 @@ rlm = RLM(
     adapter=adapter,
     # Route the many small sub-LLM calls to a cheaper model
     subcall_adapter=OpenAICompatAdapter(model="gpt-5.1-mini"),
+    # Persist subcall results to disk — identical subcalls aren't paid twice
+    cache=FileCache(root="./.rlm_cache"),
     # Let sub-LLMs run their own mini-RLM loop on large chunks (paper-aligned)
     recursive_subcalls=True,
     # Fan out independent subcalls concurrently (LLM calls are I/O-bound)
@@ -99,6 +101,7 @@ rlm = RLM(
 # Ask questions over the entire corpus
 answer, trace = rlm.run("What are the main themes across all documents?", context)
 print(answer)
+print(f"Solved in {len(trace.steps)} steps")  # the trace logs every step of the loop
 ```
 
 > For unusually long trajectories you can also enable `compaction=True` with
