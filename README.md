@@ -73,25 +73,37 @@ export LLM_API_KEY="your-api-key-here"
 ### 2. Basic usage
 
 ```python
+from pathlib import Path
+
 from pyrlm_runtime import RLM, Context
 from pyrlm_runtime.adapters import OpenAICompatAdapter
 
-# Create context from your documents
-documents = [
-    "Document 1: Very long content...",
-    "Document 2: More content...",
-    # ... could be 100s of documents, millions of tokens
-]
+# Load a whole folder of Markdown docs as context — this can be hundreds of
+# files and millions of tokens. The data lives in the REPL, NOT in the prompt,
+# so the size of this list is not bounded by the model's context window.
+documents = [p.read_text(encoding="utf-8") for p in Path("docs/").rglob("*.md")]
 context = Context.from_documents(documents)
 
-# Initialize RLM with an adapter
-adapter = OpenAICompatAdapter(model="gpt-4")
-rlm = RLM(adapter=adapter)
+# Initialize RLM with an adapter and a few useful options enabled
+adapter = OpenAICompatAdapter(model="gpt-5.1")
+rlm = RLM(
+    adapter=adapter,
+    # Route the many small sub-LLM calls to a cheaper model
+    subcall_adapter=OpenAICompatAdapter(model="gpt-5.1-mini"),
+    # Let sub-LLMs run their own mini-RLM loop on large chunks (paper-aligned)
+    recursive_subcalls=True,
+    # Fan out independent subcalls concurrently (LLM calls are I/O-bound)
+    parallel_subcalls=True,
+)
 
-# Ask questions over the entire context
+# Ask questions over the entire corpus
 answer, trace = rlm.run("What are the main themes across all documents?", context)
 print(answer)
 ```
+
+> For unusually long trajectories you can also enable `compaction=True` with
+> `compaction_threshold_pct=0.85` to summarize old turns instead of overflowing
+> the window — see [Multi-Turn Conversation History](#multi-turn-conversation-history).
 
 ### 3. Run without external APIs (for testing)
 
@@ -260,12 +272,12 @@ from pyrlm_runtime import Context
 # From a single text
 context = Context.from_text("Your long text here...")
 
-# From multiple documents (separated by markers)
+# From multiple documents (joined by `separator`, default "\n\n---\n\n")
 context = Context.from_documents([
     "Document 1 content...",
     "Document 2 content...",
     "Document 3 content...",
-], separator="\n---DOC_BOUNDARY---\n")
+])  # override with separator="..." if you need a custom boundary
 
 # Available methods (used by the LLM inside the REPL):
 context.len_chars()                    # Total character count
@@ -291,7 +303,7 @@ Works with OpenAI, Anthropic (via proxy), Ollama, LM Studio, vLLM, and any OpenA
 from pyrlm_runtime.adapters import OpenAICompatAdapter
 
 # OpenAI
-adapter = OpenAICompatAdapter(model="gpt-4")
+adapter = OpenAICompatAdapter(model="gpt-5.1")
 
 # Ollama (local)
 adapter = OpenAICompatAdapter(
@@ -355,6 +367,7 @@ class MyAdapter:
     def complete(
         self,
         messages: list[dict[str, str]],
+        *,                                  # max_tokens / temperature are keyword-only
         max_tokens: int = 512,
         temperature: float = 0.0,
     ) -> ModelResponse:
@@ -906,7 +919,7 @@ LLM_BASE_URL="http://localhost:11434/v1"  # Ollama
 | Provider      | Setup                                                                       |
 | ------------- | --------------------------------------------------------------------------- |
 | **Azure**     | `AzureOpenAIAdapter(model="gpt-5.1")` + `AZURE_OPENAI_API_KEY` + endpoint   |
-| **OpenAI**    | `OpenAICompatAdapter(model="gpt-4")` + `LLM_API_KEY`                        |
+| **OpenAI**    | `OpenAICompatAdapter(model="gpt-5.1")` + `LLM_API_KEY`                      |
 | **Anthropic** | Via OpenAI-compatible proxy                                                 |
 | **Ollama**    | `OpenAICompatAdapter(model="llama3", base_url="http://localhost:11434/v1")` |
 | **LM Studio** | `OpenAICompatAdapter(model="...", base_url="http://localhost:1234/v1")`     |
