@@ -24,7 +24,12 @@ class Context:
 
     @classmethod
     def from_documents(cls, documents: List[str], *, separator: str = "\n\n---\n\n") -> "Context":
-        """Create context from a list of documents (e.g., for BrowseComp+)."""
+        """Create context from a list of documents (e.g., for BrowseComp+).
+
+        Note: the documents are kept both individually (``documents``) and as a
+        single concatenated string (``text``, joined by ``separator``). For very
+        large corpora this means roughly 2x the raw text size is held in memory.
+        """
         if not documents:
             return cls(text="", documents=(), context_type="document_list")
         text = separator.join(documents)
@@ -74,6 +79,13 @@ class Context:
         case_sensitive: bool = True,
         flags: int | None = None,
     ) -> List[Tuple[int, int, str]]:
+        """Search the context text, returning ``(start, end, matched_text)`` tuples.
+
+        Literal substring search by default. Passing ``regex=True`` -- or any
+        non-None ``flags`` -- switches to regular-expression matching, so the
+        pattern is interpreted as a regex even when ``regex`` is left False.
+        ``case_sensitive`` is ignored when explicit ``flags`` are given.
+        """
         if max_matches <= 0:
             return []
         if pattern == "":
