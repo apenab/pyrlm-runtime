@@ -440,6 +440,22 @@ cache = FileCache(root="./cache")
 rlm = RLM(adapter=adapter, cache=cache)
 ```
 
+The cache key includes the **effective subcall model** (the adapter that serves
+the call, e.g. a cheaper `subcall_adapter`), so entries from different models
+never collide in a shared cache directory. Writes are **atomic** and reads
+tolerate a corrupt/half-written entry by degrading to a miss, so the cache is
+safe to share with `parallel_subcalls=True`. (Changing the subcall model
+invalidates prior entries by design — they simply become misses.)
+
+> **Disclaimer:** the model identity is resolved from the adapter's `model_id` /
+> `model_name` / `model` attribute (built-in adapters — `OpenAICompatAdapter`,
+> `AzureOpenAIAdapter`, `VertexAIAdapter`, `GenericChatAdapter`, `FakeAdapter` —
+> all expose one). Identity is by **model id only**, not by endpoint or adapter
+> instance: two adapters pointing at the same model id but different `base_url` /
+> region will share cache entries. Use a separate cache `root` per endpoint if
+> that matters. Custom adapters exposing none of those attributes fall back to
+> their class name.
+
 ### Router
 
 Automatically selects between baseline (direct LLM call) and RLM based on context size.

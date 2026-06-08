@@ -662,10 +662,14 @@ class RLM:
                     "Build your final answer now using the information you already have."
                 )
 
-            # Include recursive flag in cache key for correct cache separation
+            # Include recursive flag in cache key for correct cache separation.
+            # Fold in the *effective* model identity (the adapter that actually
+            # serves this subcall) so entries from different models — e.g. a
+            # cheaper subcall_adapter — never collide in a shared cache dir.
             recursive_flag = self.recursive_subcalls and depth < self.max_recursion_depth
+            effective_model = model or _adapter_identity(effective_subcall_adapter)
             cache_key = _cache_key(
-                text=text, model=model, max_tokens=max_tokens, recursive=recursive_flag
+                text=text, model=effective_model, max_tokens=max_tokens, recursive=recursive_flag
             )
             input_hash = _hash_text(text)
             cached = cache.get(cache_key)
@@ -2922,6 +2926,25 @@ def _try_resolve_final(final: tuple[str, str], repl: PythonREPL) -> str | None:
 
 def _hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _adapter_identity(adapter: object) -> str:
+    """Best-effort stable identifier for the model an adapter serves.
+
+    Used to keep cache entries from different models/adapters from colliding.
+    Probes ``model_id`` / ``model_name`` / ``model`` and returns the first that
+    is a non-empty *string*. The string guard matters: e.g. ``VertexAIAdapter``
+    stores the model id in ``model_name`` while ``model`` holds a non-string
+    ``GenerativeModel`` object, which must not be used as an identity. Adapters
+    exposing none fall back to their class name (distinct across adapter types,
+    but not across instances of the same type — see the disclaimer in the
+    README Cache section).
+    """
+    for attr in ("model_id", "model_name", "model"):
+        value = getattr(adapter, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    return type(adapter).__name__
 
 
 def _cache_key(*, text: str, model: str | None, max_tokens: int, recursive: bool = False) -> str:

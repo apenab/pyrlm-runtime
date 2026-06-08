@@ -19,6 +19,11 @@ class OpenAICompatAdapter(ModelAdapter):
         api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
         self._adapter = GenericChatAdapter(base_url=base, model=model, api_key=api_key)
 
+    @property
+    def model(self) -> str | None:
+        """The configured model id (used, among others, for cache-key identity)."""
+        return self._adapter.model
+
     def complete(
         self,
         messages: list[dict[str, str]],
