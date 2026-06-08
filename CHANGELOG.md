@@ -1,17 +1,13 @@
-## Unreleased
-
-### Fix
-
-- **cache**: fold the effective subcall model identity into the cache key so
-  entries from different models (e.g. a cheaper `subcall_adapter`) no longer
-  collide in a shared cache directory. Prior entries become misses by design.
-- **cache**: make `FileCache` crash-safe and concurrency-safe — atomic writes
-  (temp file + rename) and reads that degrade to a miss on a corrupt/half-written
-  entry, so it is safe to use with `parallel_subcalls=True`.
+## v1.0.2 (2026-06-08)
 
 ### Feat
 
-- **adapters**: `OpenAICompatAdapter` now exposes a `model` property.
+- add FileCache for persisting subcall results and improve performance
+- **docs**: update usage examples and improve context handling in README
+
+### Fix
+
+- **cache**: separate cache keys by model and make FileCache crash-safe
 
 ## v1.0.1 (2026-06-05)
 
