@@ -344,6 +344,35 @@ adapter = GenericChatAdapter(
 
 Auto-retries on 429, 500, 502, 503, 504 with exponential backoff. Supports context manager (`with GenericChatAdapter(...) as adapter:`).
 
+#### VertexAIAdapter
+
+Google Cloud Vertex AI (Gemini). Requires `google-cloud-aiplatform` / `vertexai`
+and GCP credentials (ADC or a service account).
+
+```python
+from pyrlm_runtime.adapters import VertexAIAdapter
+
+adapter = VertexAIAdapter(
+    project_id="my-gcp-project",
+    location="us-central1",
+    model="gemini-2.5-pro",
+    api_transport="rest",   # default; use "grpc" to opt back into gRPC
+)
+```
+
+`api_transport` defaults to **`"rest"`**: REST honors `HTTPS_PROXY` and the
+system CA bundle (`REQUESTS_CA_BUNDLE` / `SSL_CERT_FILE`) — required behind
+corporate proxies with a self-signed TLS certificate — and is immune to the
+gRPC pollset deadlock that long-running loops hit. Pass `api_transport="grpc"`
+to restore the previous gRPC transport. The transport is configured via
+`vertexai.init`, which is **process-global SDK state**: do not mix transports
+across multiple adapters in the same process — the last `init` wins.
+
+The adapter normalizes Gemini's finish reasons to the loop's vocabulary
+(`MAX_TOKENS` → `"length"`, `STOP` → `"stop"`) in `ModelResponse.meta`, skips
+thinking parts when extracting the answer text, and folds `thoughts_token_count`
+into completion-token usage for Gemini 2.5 thinking models.
+
 #### FakeAdapter
 
 Deterministic adapter for testing. No external API needed.

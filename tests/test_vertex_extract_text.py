@@ -33,8 +33,9 @@ def _adapter() -> "VertexAIAdapter":
 
 
 class _Part:
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, thought: bool = False) -> None:
         self.text = text
+        self.thought = thought
 
 
 class _Content:
@@ -116,3 +117,16 @@ def test_extract_text_skips_bad_part_keeps_good_parts() -> None:
         candidates=[_Candidate([_Part("good output"), _RaisingPart()])],
     )
     assert _adapter()._extract_text(resp) == "good output"
+
+
+def test_extract_text_skips_thought_part() -> None:
+    """Regression: Gemini 2.5 thinking models emit a reasoning part
+    (part.thought=True) alongside the answer. The thinking summary must NOT
+    leak into the visible answer text."""
+    resp = _Response(
+        raises=True,
+        candidates=[
+            _Candidate([_Part("internal reasoning...", thought=True), _Part("the answer")])
+        ],
+    )
+    assert _adapter()._extract_text(resp) == "the answer"

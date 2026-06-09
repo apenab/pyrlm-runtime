@@ -15,6 +15,7 @@ from pyrlm_runtime.retrieval import (
     ElasticsearchRetriever,
     RetrieverProtocol,
     _build_filter_clauses,
+    _embed_vertexai_query,
 )
 
 
@@ -532,10 +533,58 @@ class TestElasticsearchRetrieverVectorSearch:
             "conceptual query",
             model="text-embedding-005",
             ssl_verify=True,
+            api_transport="rest",
         )
         assert len(results) == 1
         call_body = mock_client.search.call_args[1]["body"]
         assert call_body["knn"]["query_vector"] == [0.4, 0.5, 0.6]
+
+    def test_vector_search_threads_embedding_api_transport(self) -> None:
+        """embedding_api_transport is forwarded to _embed_vertexai_query so the
+        Vertex embedding path uses REST by default and can opt into gRPC."""
+        retriever = ElasticsearchRetriever(
+            host="https://localhost:9200",
+            api_key="test-key",
+            index="test-index",
+            embedding_provider="vertexai",
+            embedding_model="text-embedding-005",
+            embedding_api_transport="grpc",
+        )
+        mock_client = MagicMock()
+        mock_client.search.return_value = _mock_search_response(
+            _make_hit("doc1", "semantic result", 0.95),
+        )
+        retriever._client = mock_client
+
+        with patch(
+            "pyrlm_runtime.retrieval._embed_vertexai_query",
+            return_value=[0.4, 0.5, 0.6],
+        ) as mock_embed:
+            retriever.vector_search("conceptual query")
+
+        assert mock_embed.call_args.kwargs["api_transport"] == "grpc"
+
+
+def test_embed_vertexai_query_passes_api_transport_to_init() -> None:
+    """Regression: _embed_vertexai_query must init the SDK with the chosen
+    transport. Default REST is what makes ssl_verify=False (a requests-level
+    patch) coherent — under gRPC the SSL skip would not apply at all."""
+    vertexai = pytest.importorskip("vertexai")
+
+    fake_model = MagicMock()
+    fake_model.get_embeddings.return_value = [MagicMock(values=[0.1, 0.2, 0.3])]
+
+    with (
+        patch.object(vertexai, "init") as mock_init,
+        patch(
+            "vertexai.preview.language_models.TextEmbeddingModel.from_pretrained",
+            return_value=fake_model,
+        ),
+    ):
+        vec = _embed_vertexai_query("q", model="text-embedding-005")
+
+    assert vec == [0.1, 0.2, 0.3]
+    mock_init.assert_called_once_with(api_transport="rest")
 
 
 class TestElasticsearchRetrieverHybridSearch:

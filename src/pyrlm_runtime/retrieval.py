@@ -406,8 +406,15 @@ def _embed_vertexai_query(
     *,
     model: str,
     ssl_verify: bool = True,
+    api_transport: str = "rest",
 ) -> list[float]:
-    """Embed a short query via Vertex AI using ADC credentials."""
+    """Embed a short query via Vertex AI using ADC credentials.
+
+    ``api_transport`` defaults to ``"rest"``: REST honors ``HTTPS_PROXY`` and the
+    system CA bundle and is what makes ``ssl_verify=False`` effective — that
+    workaround monkey-patches ``requests`` (the REST transport), so under gRPC it
+    would not apply at all. Pass ``"grpc"`` to restore the previous transport.
+    """
     try:
         import vertexai
         from vertexai.preview.language_models import TextEmbeddingModel
@@ -420,7 +427,7 @@ def _embed_vertexai_query(
     if not ssl_verify:
         _disable_google_ssl_verify()
 
-    vertexai.init()
+    vertexai.init(api_transport=api_transport)
     embedding_model = TextEmbeddingModel.from_pretrained(model)
     embeddings = embedding_model.get_embeddings([text])
     if not embeddings:
@@ -590,6 +597,12 @@ class ElasticsearchRetriever:
     embedding_base_url:
         Base URL for the embedding API.  Defaults to
         ``https://api.openai.com/v1``.
+    embedding_api_transport:
+        Transport for the Vertex AI embedding provider, ``"rest"`` (default)
+        or ``"grpc"``.  Only relevant when ``embedding_provider="vertexai"``.
+        REST honors ``HTTPS_PROXY`` / the system CA bundle and is what makes
+        ``embedding_ssl_verify=False`` effective (that workaround patches the
+        REST transport); under gRPC the SSL skip would not apply.
     preview_length:
         Maximum character length of the ``preview`` snippet returned by
         search methods.
@@ -618,6 +631,7 @@ class ElasticsearchRetriever:
     embedding_api_key: str | None = field(default=None, repr=False)
     embedding_base_url: str = "https://api.openai.com/v1"
     embedding_ssl_verify: bool = True
+    embedding_api_transport: str = "rest"
     preview_length: int = 500
 
     # Proxy / TLS
@@ -769,6 +783,7 @@ class ElasticsearchRetriever:
                 text,
                 model=self.embedding_model,
                 ssl_verify=self.embedding_ssl_verify,
+                api_transport=self.embedding_api_transport,
             )
         else:
             import os
@@ -1125,6 +1140,7 @@ class AsyncElasticsearchRetriever:
     embedding_api_key: str | None = field(default=None, repr=False)
     embedding_base_url: str = "https://api.openai.com/v1"
     embedding_ssl_verify: bool = True
+    embedding_api_transport: str = "rest"
     preview_length: int = 500
 
     # Cache configuration
@@ -1268,6 +1284,7 @@ class AsyncElasticsearchRetriever:
                 text,
                 model=self.embedding_model,
                 ssl_verify=self.embedding_ssl_verify,
+                api_transport=self.embedding_api_transport,
             )
         else:
             import os

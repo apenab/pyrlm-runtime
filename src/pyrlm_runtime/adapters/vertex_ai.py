@@ -33,7 +33,7 @@ import time
 from contextlib import contextmanager
 from typing import Any, Iterator
 
-from google.cloud import aiplatform
+import vertexai
 from vertexai.generative_models import GenerationConfig, GenerativeModel
 
 from .base import ModelResponse, Usage
@@ -53,6 +53,7 @@ class VertexAIAdapter:
         model: Gemini model name (default: "gemini-2.5-pro")
         timeout: Request timeout in seconds
         max_retries: Maximum number of retry attempts for transient errors
+        api_transport: SDK transport, "rest" (default) or "grpc"
     """
 
     def __init__(
@@ -62,6 +63,7 @@ class VertexAIAdapter:
         model: str = "gemini-2.5-pro",
         timeout: int = 600,
         max_retries: int = 3,
+        api_transport: str = "rest",
         logger_instance: logging.Logger | None = None,
     ):
         """Initialize Vertex AI adapter.
@@ -72,6 +74,16 @@ class VertexAIAdapter:
             model: Gemini model identifier
             timeout: Request timeout in seconds
             max_retries: Max retry attempts for 429/503/504 errors
+            api_transport: SDK transport to use. ``"rest"`` (the default) uses
+                HTTP/REST, which honors ``HTTPS_PROXY`` and the system CA bundle
+                (``REQUESTS_CA_BUNDLE`` / ``SSL_CERT_FILE``) — required behind
+                corporate proxies with a self-signed TLS certificate — and is
+                immune to the gRPC pollset deadlock that ``_call_timeout_guard``
+                works around. ``"grpc"`` restores the previous transport.
+
+                NOTE: the transport is configured via ``vertexai.init``, which
+                writes process-global SDK state. Do not mix transports across
+                multiple adapters in the same process — the last ``init`` wins.
             logger_instance: Optional custom logger
         """
         self.project_id = project_id
@@ -79,13 +91,16 @@ class VertexAIAdapter:
         self.model_name = model
         self.timeout = timeout
         self.max_retries = max_retries
+        self.api_transport = api_transport
         self.logger = logger_instance or logger
 
-        # Initialize Vertex AI
-        aiplatform.init(project=project_id, location=location)
+        # Initialize Vertex AI. vertexai.init (not aiplatform.init) is what
+        # configures GenerativeModel, and it accepts api_transport so REST can
+        # be selected. A single init call sets project/location/transport.
+        vertexai.init(project=project_id, location=location, api_transport=api_transport)
         self.logger.info(
             f"Initialized VertexAI adapter: project={project_id}, "
-            f"location={location}, model={model}"
+            f"location={location}, model={model}, transport={api_transport}"
         )
 
         # Initialize Gemini model
@@ -208,6 +223,11 @@ class VertexAIAdapter:
                 # Extract usage metadata if available
                 usage = self._extract_usage(response, text, messages)
 
+                # Build response meta (finish_reason, content_kind, reasoning_present).
+                # The RLM root loop relies on meta["finish_reason"] to detect
+                # truncation; without it the truncation-handling branch is dead.
+                meta = self._build_meta(response, text)
+
                 self.logger.info(
                     f"Completion successful: {usage.total_tokens} tokens, {elapsed:.2f}s"
                 )
@@ -216,6 +236,7 @@ class VertexAIAdapter:
                     text=text,
                     usage=usage,
                     model_id=self.model_name,
+                    meta=meta,
                 )
 
             except TimeoutError as exc:
@@ -285,13 +306,17 @@ class VertexAIAdapter:
                         f"Empty response parts (finish_reason={finish}), returning empty text"
                     )
                 return ""
-            # Join all text parts (handles multi-part responses). Read each part
-            # defensively: a non-text part (e.g. a function_call) can raise when
-            # its .text is accessed, and one bad part must not discard the good
-            # text parts alongside it.
+            # Join all answer text parts (handles multi-part responses). Read each
+            # part defensively: a non-text part (e.g. a function_call) can raise
+            # when its .text is accessed, and one bad part must not discard the
+            # good text parts alongside it. Skip thinking parts (part.thought is
+            # True on Gemini 2.5 thinking models) so the reasoning summary does
+            # not leak into the visible answer text.
             texts = []
             for p in parts:
                 try:
+                    if getattr(p, "thought", False):
+                        continue
                     if hasattr(p, "text") and p.text:
                         texts.append(p.text)
                 except Exception:
@@ -300,6 +325,56 @@ class VertexAIAdapter:
         except Exception as exc:
             self.logger.warning(f"Could not extract text from response parts: {exc}")
             return ""
+
+    def _build_meta(self, response: Any, text: str) -> dict[str, Any]:
+        """Build ModelResponse.meta from a Gemini response.
+
+        The RLM root loop reads meta["finish_reason"] (normalized to the
+        OpenAI-style vocabulary, e.g. "length"/"stop") to drive truncation
+        handling, plus content_kind and reasoning_present for diagnostics.
+        This mirrors the contract the OpenAI-compatible adapters provide.
+
+        Returns a dict with:
+            finish_reason: normalized reason ("length" for MAX_TOKENS, "stop"
+                for STOP, otherwise the lowercased Gemini enum name, e.g.
+                "safety"). None when there are no candidates.
+            content_kind: "text" when visible text was produced, else "empty".
+            reasoning_present: True when any response part is a thinking part.
+        """
+        finish_reason = None
+        reasoning_present = False
+        try:
+            candidates = getattr(response, "candidates", None) or []
+            if candidates:
+                finish_reason = self._normalize_finish_reason(
+                    getattr(candidates[0], "finish_reason", None)
+                )
+                content = getattr(candidates[0], "content", None)
+                parts = getattr(content, "parts", []) if content else []
+                reasoning_present = any(getattr(p, "thought", False) for p in parts)
+        except Exception as exc:
+            self.logger.debug(f"Could not build response meta: {exc}")
+
+        return {
+            "finish_reason": finish_reason,
+            "content_kind": "text" if text else "empty",
+            "reasoning_present": reasoning_present,
+        }
+
+    @staticmethod
+    def _normalize_finish_reason(raw: Any) -> str | None:
+        """Map a Gemini FinishReason to the loop's OpenAI-style vocabulary.
+
+        Gemini uses MAX_TOKENS where OpenAI uses "length", and STOP where
+        OpenAI uses "stop". The RLM loop only special-cases "length", so the
+        mapping must be applied here rather than passing the raw enum through.
+        Other reasons (SAFETY, RECITATION, ...) pass through lowercased.
+        """
+        if raw is None:
+            return None
+        name = getattr(raw, "name", None) or str(raw)
+        mapping = {"MAX_TOKENS": "length", "STOP": "stop"}
+        return mapping.get(name, name.lower())
 
     def _convert_messages(self, messages: list[dict[str, str]]) -> list[dict[str, Any]]:
         """Convert OpenAI-style messages to Gemini format.
@@ -371,6 +446,14 @@ class VertexAIAdapter:
                 prompt_tokens = getattr(usage_meta, "prompt_token_count", 0)
                 completion_tokens = getattr(usage_meta, "candidates_token_count", 0)
                 total_tokens = getattr(usage_meta, "total_token_count", 0)
+
+                # Gemini 2.5 thinking models report reasoning tokens separately
+                # in thoughts_token_count; candidates_token_count excludes them
+                # while total_token_count includes them. Fold thoughts into
+                # completion so prompt + completion == total and the cost of
+                # reasoning is not undercounted.
+                thoughts_tokens = getattr(usage_meta, "thoughts_token_count", 0) or 0
+                completion_tokens += thoughts_tokens
 
                 # If total not provided, calculate it
                 if total_tokens == 0:

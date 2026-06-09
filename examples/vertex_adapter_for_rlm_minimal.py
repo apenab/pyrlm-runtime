@@ -32,7 +32,7 @@ import logging
 import time
 from typing import Any
 
-from google.cloud import aiplatform
+import vertexai
 from vertexai.generative_models import GenerationConfig, GenerativeModel
 
 logger = logging.getLogger(__name__)
@@ -60,6 +60,7 @@ class VertexAIClientForRLMMinimal:
         project_id: str,
         location: str = "us-central1",
         model: str = "gemini-2.5-pro",
+        api_transport: str = "rest",
         logger_instance: logging.Logger | None = None,
     ):
         """Initialize Vertex AI client for rlm-minimal.
@@ -68,15 +69,20 @@ class VertexAIClientForRLMMinimal:
             project_id: GCP project ID
             location: GCP region
             model: Gemini model identifier
+            api_transport: SDK transport, "rest" (default) or "grpc". REST
+                honors HTTPS_PROXY / the system CA bundle (needed behind corporate
+                proxies with a self-signed TLS cert) and avoids the gRPC deadlock.
             logger_instance: Optional custom logger
         """
         self.project_id = project_id
         self.location = location
         self.model_name = model
+        self.api_transport = api_transport
         self.logger = logger_instance or logger
 
-        # Initialize Vertex AI
-        aiplatform.init(project=project_id, location=location)
+        # Initialize Vertex AI (vertexai.init configures GenerativeModel and
+        # accepts api_transport; default REST works behind corporate proxies).
+        vertexai.init(project=project_id, location=location, api_transport=api_transport)
         self.logger.debug(
             f"VertexAIClientForRLMMinimal initialized: project={project_id}, model={model}"
         )
