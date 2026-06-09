@@ -6,7 +6,7 @@
 
 # Google Cloud Vertex AI
 google-cloud-aiplatform>=1.60.0
-vertexai>=1.60.0
+vertexai>=1.71.1
 
 # Dataset loading
 datasets>=2.14.0
