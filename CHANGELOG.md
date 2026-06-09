@@ -1,3 +1,9 @@
+## v1.0.3 (2026-06-09)
+
+### Feat
+
+- **adapter**: add VertexAIAdapter with transport options and enhance response handling
+
 ## v1.0.2 (2026-06-08)
 
 ### Feat
