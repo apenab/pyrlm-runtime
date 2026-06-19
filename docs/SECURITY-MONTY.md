@@ -122,13 +122,3 @@ exponer, y cuyo alcance hoy es: llamar al propio LLM y leer texto ya cargado en
 memoria. La vía de control de seguridad, por tanto, es **revisar y restringir esa
 allowlist** — no "confiar en lo que escriba el modelo".
 
-## Matices honestos (conviene decirlos de entrada)
-
-1. **La base de confianza (TCB) incluye al intérprete Monty.** El aislamiento
-   depende de la corrección de pydantic-monty, que es software joven
-   (`pydantic-monty>=0.0.4,<0.0.8`). Conviene presentarlo como sandbox de defensa
-   en profundidad, no como prueba matemática de que la fuga es imposible.
-2. **El backend por defecto es `"python"`, no `"monty"`.** El backend Python usa
-   `exec()` con una whitelist de builtins/módulos (`env.py:103-198`) — un sandbox
-   mucho más débil, no apto para código no confiable. El despliegue debe fijar
-   `repl_backend="monty"` explícitamente, documentado como requisito.
