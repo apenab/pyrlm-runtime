@@ -4,7 +4,7 @@ Minimal Python runtime for **Recursive Language Models (RLMs)** — inspired by 
 
 RLMs solve the long-context problem: instead of sending huge contexts directly to an LLM (which truncates or degrades), the context lives as **environment state** in a Python REPL. The LLM writes code to inspect, search, and chunk the data, making **recursive subcalls** to smaller models when needed. Result: handle arbitrarily large contexts with constant token usage per step.
 
-[![Become a Patron](docs/assets/become_a_patron_button.png)](https://www.patreon.com/cw/u53467986)
+[![Become a Patron](docs/assets/become_a_patron_button.png)](https://www.patreon.com/u53467986)
 
 ## Table of Contents
 
