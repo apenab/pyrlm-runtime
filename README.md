@@ -23,6 +23,7 @@ RLMs solve the long-context problem: instead of sending huge contexts directly t
 - [REPL Backends](#repl-backends)
 - [REPL Functions Available to the LLM](#repl-functions-available-to-the-llm)
 - [Retrieval Integration](#retrieval-integration)
+- [Extending the REPL](#extending-the-repl)
 - [Parallel Subcalls](#parallel-subcalls)
 - [Multi-Turn Conversation History](#multi-turn-conversation-history)
 - [Guard Mechanisms & Fallbacks](#guard-mechanisms--fallbacks)
@@ -234,16 +235,29 @@ rlm = RLM(
     adapter,                            # Required: LLM adapter (see Adapters)
     policy=None,                        # Resource limits (see Policy)
     cache=None,                         # Subcall cache (see Cache)
+    cache_dir=".rlm_cache",             # Directory used when a cache is enabled
+
+    # Output limits
     max_output_tokens=4096,             # Max tokens the root LLM generates per call
-    system_prompt=BASE_SYSTEM_PROMPT,   # Override system prompt
+                                        # (output cap, not a budget — see Policy.max_total_tokens)
+
+    # System prompts
+    system_prompt=BASE_SYSTEM_PROMPT,           # Root loop system prompt
+    subcall_system_prompt=SUBCALL_SYSTEM_PROMPT,# System prompt for subcalls
+    system_prompt_supplement="",                # Extra text appended after retrieval docs
 
     # REPL backend
-    repl_backend="python",              # "python" (default) or "monty"
+    repl_backend="python",              # "python" (default) or "monty" (sandboxed)
+    repl_exec_timeout=60.0,             # Per-exec CPU-time budget in seconds (python backend; None disables)
 
-    # Conversation history
+    # Conversation history & compaction
     conversation_history=True,          # Multi-turn mode (default: True)
     compaction=False,                   # Off by default; summarizes old turns when enabled
-    compaction_threshold_pct=0.0,       # Trigger at pct of model context window (e.g. 0.85)
+    compaction_threshold_tokens=80000,  # Token threshold that triggers compaction
+    compaction_threshold_pct=0.0,       # If >0, threshold = pct * model context window (overrides above)
+    compaction_model_context_limit=0,   # Model window in tokens (needed for *_pct)
+    compaction_model_name="",           # Model name for accurate tiktoken counting (else len//4)
+    compaction_summary_max_tokens=800,  # Max tokens for the running summary
     max_history_tokens=0,               # DEPRECATED: blunt history trim (0=disabled)
 
     # Retrieval
@@ -251,15 +265,45 @@ rlm = RLM(
 
     # Subcalls
     subcall_adapter=None,               # Separate (cheaper) adapter for subcalls
-    recursive_subcalls=False,           # Subcalls run mini-RLM loops
-    max_recursion_depth=2,              # Max recursion depth
+    subcall_max_output_tokens=1024,     # Output cap per subcall response
     parallel_subcalls=False,            # Run subcalls in parallel
+    max_concurrent_subcalls=10,         # Max concurrent subcalls when parallel
+
+    # Recursive subcalls (subcall runs a mini-RLM loop)
+    recursive_subcalls=False,           # Enable recursion
+    max_recursion_depth=2,              # Max recursion depth
+    recursive_subcall_system_prompt=RECURSIVE_SUBCALL_SYSTEM_PROMPT,
+    recursive_subcall_max_steps=3,      # Max steps for a recursive subcall RLM
+
+    # Finalization control
+    auto_finalize_var=None,             # REPL var name to auto-return as the answer
+    auto_finalize_min_length=0,         # Min chars before auto_finalize_var triggers
+    auto_finalize_reject_patterns=None, # Regexes that reject an auto-finalize answer
+    auto_finalize_reject_limit=3,       # Max rejects before accepting anyway
+    auto_finalize_reject_feedback=None, # Custom feedback template on reject
+    min_steps=0,                        # Min steps before finalization is allowed
 
     # Guards & fallbacks
     require_repl_before_final=False,    # Enforce ≥1 REPL execution
     require_subcall_before_final=False, # Enforce ≥1 subcall
     invalid_response_limit=None,        # Max retries on non-code responses
     fallback_code=None,                 # Emergency code if LLM stalls
+    repl_error_limit=None,              # Abort after N consecutive REPL errors
+    loop_collapse_limit=5,              # Abort after N no-progress responses (None disables)
+    subcall_guard_steps=None,           # Force a subcall if none made by step N
+    fallback_guard_steps=None,          # Inject fallback_code if stalled by step N
+
+    # Extensions / plugins (see "Extending the REPL")
+    repl_extensions=None,               # Callable injecting domain-specific REPL functions
+    doc_tools=None,                     # dict of on-demand PDF/doc tools to inject
+
+    # Observability
+    logger=None,                        # logging.Logger for the loop
+    event_listener=None,                # RLMEventListener for streaming step events
+    rlm_diagnostics=False,              # Emit extra diagnostic logging
+    log_truncate_code=2000,             # Truncation limits (chars) for debug logs
+    log_truncate_output=1000,
+    log_truncate_prompt_summary=2000,
 )
 
 output, trace = rlm.run(query="Your question", context=context)
@@ -825,6 +869,71 @@ es_get(doc_id)                                    # Fetch full document
 ```
 
 The retrieval layer is **backend-agnostic**: any object implementing the `RetrieverProtocol` (with `search`, `vector_search`, `hybrid_search`, `get` methods) works as a drop-in backend.
+
+## Extending the REPL
+
+pyrlm-runtime is deliberately **generic** — domain logic lives in consumers, not in the
+library. The supported way to add domain-specific behaviour is through three plugin
+hooks on `RLM`, so you never have to fork the runtime.
+
+### `repl_extensions` — inject custom REPL functions
+
+A callable that receives the live loop state and returns a `{name: callable}` dict.
+Each entry is registered into the REPL environment, so the LLM can call it like any
+built-in function. This is the primary extension point for downstream projects
+(e.g. `banking-rlm`).
+
+```python
+def my_extensions(rlm, repl, retriever, log_diag):
+    """Called once per run, before the loop starts.
+
+    rlm       -- the RLM instance (read its config, adapter, policy...)
+    repl      -- the live REPL (use repl.get/set to share state)
+    retriever -- the configured retriever, or None
+    log_diag  -- callable for diagnostic logging
+    Returns: dict of {function_name: callable} to expose in the REPL.
+    """
+    def normalize_amount(s: str) -> float:
+        return float(s.replace(".", "").replace(",", "."))
+
+    return {"normalize_amount": normalize_amount}
+
+rlm = RLM(adapter=adapter, repl_extensions=my_extensions)
+# Inside the REPL the LLM can now call normalize_amount("1.234,56")
+```
+
+### `doc_tools` — on-demand PDF / document access
+
+A `dict` of `{name: callable}` injected into the REPL scaffold, following the same
+plugin pattern as `repl_extensions`. Use it to give the RLM tools that read documents
+on demand (e.g. the six tools in `pyrlm_runtime.doctools`: `list_pdfs`,
+`get_pdf_info`, `read_pdf_pages`, `extract_table`, `search_in_pdf`, `search_corpus`).
+
+```python
+rlm = RLM(adapter=adapter, doc_tools={
+    "read_pdf_pages": read_pdf_pages,
+    "search_in_pdf": search_in_pdf,
+})
+```
+
+### `system_prompt_supplement` — extra system-prompt text
+
+Free-form text appended to the system prompt after the retrieval docs. Use it to
+document the custom functions you injected via `repl_extensions`/`doc_tools` so the
+model knows they exist and how to call them.
+
+```python
+rlm = RLM(
+    adapter=adapter,
+    repl_extensions=my_extensions,
+    system_prompt_supplement=(
+        "You also have normalize_amount(s) -> float for Spanish-formatted numbers."
+    ),
+)
+```
+
+All three hooks are **additive and optional** — the runtime stays domain-free, and the
+injected names coexist with the built-in REPL functions and retrieval functions.
 
 ## Parallel Subcalls
 
