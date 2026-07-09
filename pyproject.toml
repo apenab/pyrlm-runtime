@@ -43,6 +43,7 @@ tui = [
     "textual>=8.2.3",
     "rich>=13.7",
 ]
+peek = ["tiktoken>=0.7.0"]  # peek-ai vendored under vendor/peek; only its runtime deps are needed here
 
 [project.urls]
 Homepage = "https://github.com/apenab/rlm-runtime"
@@ -70,7 +71,7 @@ indent-style = "space"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "vendor"]
 addopts = "-q"
 
 [tool.commitizen]
@@ -84,7 +85,7 @@ version_files = [
 update_changelog_on_bump = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/pyrlm_runtime"]
+packages = ["src/pyrlm_runtime", "vendor/peek"]
 
 [build-system]
 requires = ["hatchling"]

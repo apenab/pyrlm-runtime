@@ -115,7 +115,7 @@ approaches** (keywords: "probar", "medir", "benchmark", "experimento",
 "comparar contra baseline", "ver si mejora"). It does NOT apply to normal
 coding tasks (bug fixes, refactors, new features).
 
-When triggered, follow this sequence without waiting to be asked:
+When triggered, follow this sequence:
 
 1. **Hypothesis first.** State what you expect to happen and why, before
    running anything. One sentence is enough.

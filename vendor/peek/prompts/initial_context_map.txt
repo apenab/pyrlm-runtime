@@ -1,0 +1,14 @@
+## CONTEXT ROADMAP
+(Index of what the context contains and where to find it)
+
+## CONTEXT UNDERSTANDING
+(High-level understanding of the context: what it is, how it's organized, and what matters)
+
+## DOMAIN CONSTANTS
+(Exact parameters, formulas, thresholds, reference values, enum sets, and output field requirements defined by the context.)
+
+## PARSING SCHEMA
+(How to parse and navigate the context's format)
+
+## REUSABLE RESULTS
+(Reusable knowledge about the context)
