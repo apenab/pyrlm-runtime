@@ -1,8 +1,16 @@
+[![Claude for Open Source](https://img.shields.io/badge/Claude-Open%20Source%20Program-D97757?style=flat&logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48Y2lyY2xlIGN4PSIxMiIgY3k9IjEyIiByPSIzIiBmaWxsPSJ3aGl0ZSIvPjwvc3ZnPg==)](https://claude.com/contact-sales/claude-for-oss)
+
 # pyrlm-runtime
 
 Minimal Python runtime for **Recursive Language Models (RLMs)** — inspired by the [MIT CSAIL paper](https://arxiv.org/abs/2512.24601) _"Recursive Language Models"_.
 
 RLMs solve the long-context problem: instead of sending huge contexts directly to an LLM (which truncates or degrades), the context lives as **environment state** in a Python REPL. The LLM writes code to inspect, search, and chunk the data, making **recursive subcalls** to smaller models when needed. Result: handle arbitrarily large contexts with constant token usage per step.
+
+<p align="center">
+<a href="https://claude.com/contact-sales/claude-for-oss">
+  <img alt="Claude for Open Source" src="docs/claude-oss-badge.svg" height="48" />
+  </a>
+</p>
 
 [![Become a Patron](docs/assets/become_a_patron_button.png)](https://www.patreon.com/u53467986)
 
