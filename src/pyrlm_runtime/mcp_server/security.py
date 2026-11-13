@@ -9,6 +9,7 @@ from __future__ import annotations
 import hmac
 import ipaddress
 import json
+import logging
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
@@ -185,7 +186,8 @@ def run_server(server: MCPServer, config: ServerConfig, *, bearer_token: str | N
     so from then on only the protocol reaches the real stdout. Call
     ``claim_stdio()`` yourself before building the retriever to cover start-up
     output too; the CLI does. ``streamable-http`` serves :func:`build_asgi_app`
-    with uvicorn on ``config.host:config.port``.
+    with uvicorn on ``config.host:config.port``; uvicorn's logs propagate to the
+    root logger (stderr in the CLI) and access lines omit the query string.
 
     Raises:
         ConfigError: the start-up guard refuses the configuration.
@@ -196,4 +198,23 @@ def run_server(server: MCPServer, config: ServerConfig, *, bearer_token: str | N
     import uvicorn
 
     app = build_asgi_app(server, config, bearer_token=bearer_token)
-    uvicorn.run(app, host=config.host, port=config.port, log_level=config.log_level.lower())
+    access_log = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, _RedactQueryString) for f in access_log.filters):
+        access_log.addFilter(_RedactQueryString())
+    uvicorn.run(
+        app,
+        host=config.host,
+        port=config.port,
+        log_level=config.log_level.lower(),
+        log_config=None,
+    )
+
+
+class _RedactQueryString(logging.Filter):
+    """Drop the query string from uvicorn access lines: a client may put a token there."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            record.args = (*args[:2], args[2].partition("?")[0], *args[3:])
+        return True

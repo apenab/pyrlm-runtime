@@ -210,3 +210,51 @@ def test_mounted_app_keeps_auth_and_an_open_health_route():
         authorised = client.post("/rag/mcp", json=INITIALIZE, headers=auth)
 
     assert (health.status_code, anonymous.status_code, authorised.status_code) == (200, 401, 200)
+
+
+def test_http_cli_logs_to_stderr_and_never_logs_a_query_string():
+    import os
+    import socket
+    import subprocess
+    import sys
+    import time
+    from pathlib import Path
+
+    import httpx
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(Path(__file__).resolve().parent),
+        "PYRLM_MCP_RETRIEVER_FACTORY": "_mcp_fakes:make_retriever",
+        "PYRLM_MCP_TRANSPORT": "streamable-http",
+        "PYRLM_MCP_PORT": str(port),
+        "PYRLM_MCP_BEARER_TOKEN": "tok",
+        "PYRLM_MCP_LOG_LEVEL": "INFO",
+    }
+    process = subprocess.Popen(
+        [sys.executable, "-m", "pyrlm_runtime.mcp_server"],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    base = f"http://127.0.0.1:{port}"
+    try:
+        for _ in range(200):
+            try:
+                httpx.get(f"{base}/health?probe=1")
+                break
+            except httpx.TransportError:
+                time.sleep(0.05)
+        refused = httpx.post(f"{base}/mcp?access_token=QUERY-SECRET", json=INITIALIZE)
+    finally:
+        process.terminate()
+        stdout, stderr = process.communicate(timeout=30)
+
+    assert refused.status_code == 401
+    assert stdout == b""
+    assert b"/mcp" in stderr
+    assert b"QUERY-SECRET" not in stderr
+    assert b"probe=1" not in stderr

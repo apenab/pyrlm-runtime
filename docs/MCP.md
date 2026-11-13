@@ -98,7 +98,7 @@ set to an empty value is an empty list, which differs from leaving it unset.
 | `ALLOWED_ORIGINS` | none | Extra `Origin` header values to accept |
 | `BEARER_TOKEN` | none | Token clients must send. Secret |
 | `ALLOW_UNAUTHENTICATED` | `0` | `1` lets a non-loopback server start without a token, for a gateway that authenticates clients |
-| `LOG_LEVEL` | `INFO` | Log level. Logs go to stderr |
+| `LOG_LEVEL` | `INFO` | Log level. All logs, including uvicorn's access log, go to stderr. Access lines omit the query string |
 | `NAME` | `pyrlm-runtime` | Server name reported to clients |
 | `ES_HOST`, `ES_INDEX` | none | Elasticsearch cluster URL and index. Setting `ES_HOST` selects the built-in retriever |
 | `ES_API_KEY` | none | Elasticsearch API key. Secret |
