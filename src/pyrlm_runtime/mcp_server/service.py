@@ -194,6 +194,10 @@ class RetrievalService:
 
     def _check_filters(self, filters: dict[str, Any] | None) -> None:
         for key in filters or {}:
+            if "*" in key:
+                raise InvalidRequest(
+                    f"filter key {key!r} is not allowed: a wildcard can name several fields"
+                )
             if _touches_denied_field(key, self._denylist) or (
                 self._filterable is not None and key not in self._filterable
             ):

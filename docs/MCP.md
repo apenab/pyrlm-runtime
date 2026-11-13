@@ -255,7 +255,10 @@ of text plus the unit's metadata. `METADATA_DENYLIST` removes fields from
 results and refuses them as filter keys, because a filter on a hidden field
 reveals its value through which hits come back. A denied field's subfields
 (such as Elasticsearch's `ssn.keyword`) and its parent object are refused as
-well. `FILTERABLE_FIELDS` narrows the filter keys further.
+well. A filter key that contains `*` is always refused: Elasticsearch expands
+`*` in a field name (an `exists` filter on `ss*` matches `ssn`), so one key
+could reach a denied field. `FILTERABLE_FIELDS` narrows the filter keys
+further.
 
 **`BASE_FILTERS` is not an access boundary.** It scopes every search, but reads
 by id (`get_document`, `get_pages`) skip it. To separate tenants, use an

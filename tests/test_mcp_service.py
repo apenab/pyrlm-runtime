@@ -240,3 +240,12 @@ class TestGetPagesLimits:
     def test_more_page_numbers_than_max_pages_is_rejected(self):
         with pytest.raises(InvalidRequest, match="between 1 and 2"):
             _service(max_pages=2).get_pages("a", pages=[1, 2, 3])
+
+
+class TestWildcardFilterKeys:
+    @pytest.mark.parametrize("key", ["ss*", "*", "owner.*", "*.keyword"])
+    def test_a_key_that_can_name_several_fields_is_rejected(self, key):
+        service = _service(metadata_denylist=("ssn",))
+
+        with pytest.raises(InvalidRequest, match="wildcard"):
+            service.search("revenue", filters={key: {"exists": True}})
