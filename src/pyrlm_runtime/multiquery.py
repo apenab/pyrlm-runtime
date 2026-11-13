@@ -185,6 +185,8 @@ class QueryRewriter:
             {"role": "system", "content": self._system_prompt},
             {"role": "user", "content": query},
         ]
+        with self._lock:
+            self._calls += 1
         try:
             response = self._adapter.complete(messages, max_tokens=self._max_tokens)
         except Exception:
@@ -192,8 +194,6 @@ class QueryRewriter:
                 "QueryRewriter adapter call failed; returning no rewrites", exc_info=True
             )
             return []
-        with self._lock:
-            self._calls += 1
         text = getattr(response, "text", None)
         if text is None:
             text = str(response)

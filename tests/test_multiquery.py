@@ -176,3 +176,4 @@ def test_rewriter_adapter_failure_returns_empty_and_warns(caplog):
     with caplog.at_level("WARNING", logger="pyrlm_runtime.multiquery"):
         assert rw.rewrite("q") == []
     assert "provider 503" in caplog.text
+    assert rw.calls == 1
