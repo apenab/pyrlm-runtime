@@ -213,7 +213,7 @@ read the rest. An unknown id is a tool error.
 | Argument | Default | Meaning |
 |---|---|---|
 | `logical_doc_id` | required | `logical_doc_id` of a hit. A hit's `doc_id` finds nothing |
-| `pages` | required | Page numbers to read, at most `MAX_PAGES` of them |
+| `pages` | required | Page numbers to read, at most `MAX_PAGES` of them. Pages count from 1; a number below 1 or above 1,000,000 is a tool error |
 | `radius` | `0` | Neighbouring pages to add on each side, clamped to `[0, MAX_PAGES]` |
 
 Returns `pages` (each with `doc_id`, `page_num`, `content`,

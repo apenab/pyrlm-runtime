@@ -21,6 +21,9 @@ from .schemas import DocumentResponse, Page, PagesResponse, SearchHit, SearchRes
 
 _PREVIEW_FALLBACK_CHARS = 500
 
+MAX_PAGE_NUMBER = 1_000_000
+"""Largest page number ``get_pages`` accepts; pages count from 1."""
+
 _SEARCH_METHODS: dict[SearchMode, str] = {
     "hybrid": "hybrid_search",
     "lexical": "search",
@@ -162,6 +165,8 @@ class RetrievalService:
         max_pages = self._config.max_pages
         if not pages or len(pages) > max_pages:
             raise InvalidRequest(f"pages must list between 1 and {max_pages} page numbers")
+        if any(not 1 <= page <= MAX_PAGE_NUMBER for page in pages):
+            raise InvalidRequest(f"page numbers must be between 1 and {MAX_PAGE_NUMBER}")
         radius_applied = max(0, min(radius, max_pages))
         raw_pages = self._get_pages(
             logical_doc_id, pages=list(pages), radius=radius_applied, max_pages=max_pages

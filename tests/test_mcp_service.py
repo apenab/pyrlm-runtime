@@ -237,6 +237,13 @@ class TestGetPagesLimits:
         assert response.truncated is True
         assert 0 < len(response.pages) < 5
 
+    @pytest.mark.parametrize("page", [0, -3, 1_000_001, 10**30])
+    def test_page_numbers_outside_the_valid_range_are_rejected(self, page):
+        retriever = PagedRetriever()
+
+        with pytest.raises(InvalidRequest, match="between 1 and 1000000"):
+            _service(retriever).get_pages("a", pages=[1, page])
+
     def test_more_page_numbers_than_max_pages_is_rejected(self):
         with pytest.raises(InvalidRequest, match="between 1 and 2"):
             _service(max_pages=2).get_pages("a", pages=[1, 2, 3])
