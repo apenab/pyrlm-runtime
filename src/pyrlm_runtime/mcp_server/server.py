@@ -10,7 +10,7 @@ from __future__ import annotations
 import enum
 import logging
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -156,7 +156,7 @@ def _retrieval_handlers(
 
 
 @contextmanager
-def _tool_call(tool: str) -> Iterator[None]:
+def _tool_call(tool: str) -> Generator[None]:
     started = time.perf_counter()
     status = "ok"
     try:
