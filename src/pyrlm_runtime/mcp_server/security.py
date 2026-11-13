@@ -15,6 +15,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .config import ConfigError, ServerConfig
+from .stdio import serve_stdio
 
 HEALTH_PATH = "/health"
 
@@ -180,15 +181,17 @@ def build_asgi_app(
 def run_server(server: MCPServer, config: ServerConfig, *, bearer_token: str | None = None) -> None:
     """Serve ``server`` on the transport ``config`` names, blocking until it stops.
 
-    ``stdio`` reads requests from stdin and writes responses to stdout, so
-    nothing else in the process may write to stdout. ``streamable-http``
-    serves :func:`build_asgi_app` with uvicorn on ``config.host:config.port``.
+    ``stdio`` first calls :func:`~pyrlm_runtime.mcp_server.stdio.claim_stdio`,
+    so from then on only the protocol reaches the real stdout. Call
+    ``claim_stdio()`` yourself before building the retriever to cover start-up
+    output too; the CLI does. ``streamable-http`` serves :func:`build_asgi_app`
+    with uvicorn on ``config.host:config.port``.
 
     Raises:
         ConfigError: the start-up guard refuses the configuration.
     """
     if config.transport == "stdio":
-        server.run("stdio")
+        serve_stdio(server)
         return
     import uvicorn
 

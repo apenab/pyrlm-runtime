@@ -10,6 +10,7 @@ import sys
 
 from dotenv import load_dotenv
 
+from pyrlm_runtime.mcp_server.stdio import claim_stdio
 from pyrlm_runtime.mcp_server import (
     ConfigError,
     Secrets,
@@ -40,6 +41,8 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"pyrlm-mcp: invalid configuration: {exc}", file=sys.stderr)
         return 2
+    if config.transport == "stdio":
+        claim_stdio()
     logging.basicConfig(
         stream=sys.stderr, level=config.log_level, format="%(asctime)s %(levelname)s %(message)s"
     )

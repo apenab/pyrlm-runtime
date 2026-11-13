@@ -35,6 +35,7 @@ src/pyrlm_runtime/
     service.py    # RetrievalService, ScopedRetriever; never imports mcp
     server.py     # build_server: capability matrix, tool registration
     security.py   # build_asgi_app, run_server, start-up guard, bearer middleware
+    stdio.py      # claim_stdio: protocol on private fds, fd 1 -> stderr
     prompts.py    # Tool descriptions and server instructions
     __main__.py   # pyrlm-mcp CLI
   doctools/
@@ -101,8 +102,10 @@ extra (`pip install "pyrlm-runtime[mcp]"`). Rules:
   MCP adapter.
 - Tools are published by capability through the table in `server.py`.
 - Importing `pyrlm_runtime` must not import `mcp` (`tests/test_mcp_imports.py`).
-- On stdio, stdout is the protocol channel: log to stderr and never run a
-  `PythonREPL` in the server process.
+- On stdio, stdout is the protocol channel: `claim_stdio()` (in `stdio.py`)
+  moves the protocol to private descriptors and points fd 1 at stderr before
+  any user code runs. Log to stderr and never run a `PythonREPL` in the server
+  process.
 
 Design: `docs/MCP-SERVER-RFC.md`. User guide: `docs/MCP.md`.
 

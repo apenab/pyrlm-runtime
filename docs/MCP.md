@@ -275,10 +275,20 @@ also holds tools that change systems.
 names. Treat the server's environment like code, for example when it comes from
 a Kubernetes ConfigMap.
 
-**stdout belongs to the protocol.** On stdio, any write to stdout corrupts the
-MCP stream. The server logs to stderr. Never run a `PythonREPL` in the server
-process: it redirects `sys.stdout` for the whole process. The server does not
-expose `embedding_ssl_verify`, which patches `requests` for the whole process.
+**stdout belongs to the protocol.** On stdio, a stray byte on stdout corrupts
+the MCP stream. `pyrlm-mcp` guarantees that only protocol messages reach the
+real stdout, for the whole life of the process. Before it builds the retriever,
+it moves the protocol to private file descriptors that child processes do not
+inherit. It then points file descriptor 1 at stderr and file descriptor 0 at
+the null device. Output from `print`, `sys.stdout.write`, `os.write(1, ...)`, C
+extensions and child processes therefore goes to stderr, whether it happens
+while the retriever module is imported, while it is built, during a tool call
+or in `close()`. Stray reads from stdin see end of file. The guarantee does not
+cover output written before the command starts, such as by `sitecustomize`.
+Programmatic `run_server` gives the same guarantee from the moment it is
+called. Call `pyrlm_runtime.mcp_server.stdio.claim_stdio()` first to cover
+start-up as well. The server does not expose `embedding_ssl_verify`, which
+patches `requests` for the whole process.
 
 ## Limitations
 
