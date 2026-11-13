@@ -26,6 +26,13 @@ def _error_text(result) -> str:
     return result.content[0].text
 
 
+def _schema_modes(tool) -> set[str]:
+    options = tool.input_schema["properties"]["mode"]["anyOf"]
+    return {
+        value for option in options for value in option.get("enum", [option.get("const")]) if value
+    }
+
+
 class TestCapabilities:
     def test_nothing_configured_refuses_to_build(self):
         with pytest.raises(ConfigError, match="nothing to publish"):
@@ -57,10 +64,17 @@ class TestCapabilities:
             assert tool.annotations.idempotent_hint is True
             assert tool.output_schema is not None
 
+    async def test_schema_lists_every_mode_by_default(self):
+        async with _client(InMemoryRetriever()) as client:
+            tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+
+        assert _schema_modes(tools["search"]) == {"hybrid", "lexical", "semantic"}
+
     async def test_search_description_names_only_configured_modes(self):
         async with _client(InMemoryRetriever(), search_modes=("lexical",)) as client:
             tools = {tool.name: tool for tool in (await client.list_tools()).tools}
 
+        assert _schema_modes(tools["search"]) == {"lexical"}
         description = tools["search"].description
         assert "`lexical`" in description
         assert "`semantic`" not in description
@@ -85,11 +99,13 @@ class TestSearchTool:
 
         assert result.structured_content["results"][0]["content"].startswith("Beta memo")
 
-    async def test_unavailable_mode_is_a_tool_error_listing_available_modes(self):
+    async def test_unavailable_mode_is_a_tool_error_naming_the_offered_modes(self):
         async with _client(InMemoryRetriever(), search_modes=("lexical",)) as client:
             result = await client.call_tool("search", {"query": "revenue", "mode": "semantic"})
 
-        assert "available modes: lexical" in _error_text(result)
+        text = _error_text(result)
+        assert "mode" in text
+        assert "'lexical'" in text
 
     async def test_invalid_argument_type_is_a_tool_error(self):
         async with _client(InMemoryRetriever()) as client:

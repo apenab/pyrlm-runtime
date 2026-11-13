@@ -183,7 +183,7 @@ error (`isError: true`), never an empty success.
 | Argument | Default | Meaning |
 |---|---|---|
 | `query` | required | Search text. Must not be blank |
-| `mode` | first of `SEARCH_MODES` | `hybrid`, `lexical` or `semantic`. A mode the server does not offer is a tool error that lists the offered modes |
+| `mode` | first of `SEARCH_MODES` | `hybrid`, `lexical` or `semantic`. The tool's input schema lists only the modes in `SEARCH_MODES`; any other value is a tool error that names the offered modes |
 | `top_k` | `10` | Hits to return, clamped to `[1, MAX_TOP_K]` |
 | `filters` | none | Metadata filters, in the filter syntax of `RetrieverProtocol` |
 | `include_content` | `false` | Add each hit's text, truncated to `MAX_CONTENT_CHARS` |

@@ -138,6 +138,10 @@ def _retrieval_handlers(
                 query, mode=mode, top_k=top_k, filters=filters, include_content=include_content
             )
 
+    # The schema's mode enum lists only the offered modes. The annotation is
+    # replaced with a type object, which the SDK uses as is.
+    search.__annotations__["mode"] = Literal[tuple(config.search_modes)] | None  # ty: ignore[invalid-type-form]
+
     def get_document(
         doc_id: str, offset: int = 0, max_chars: int | None = None
     ) -> DocumentResponse:
