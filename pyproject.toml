@@ -41,7 +41,7 @@ dependencies = [
 rich = ["rich>=13.7"]
 examples = ["datasets>=4.7.0", "rank-bm25>=0.2.2", "tiktoken>=0.7"]
 elasticsearch = ["elasticsearch[async]>=8.0"]
-mcp = ["mcp>=2.2,<3"]
+mcp = ["mcp>=2.3,<3"]
 tui = [
     "textual>=8.2.3",
     "rich>=13.7",
@@ -59,7 +59,7 @@ Issues = "https://github.com/apenab/rlm-runtime/issues"
 dev = [
   "commitizen>=4.13.7",
   "datasets>=4.7.0",
-  "mcp>=2.2,<3",
+  "mcp>=2.3,<3",
   "pytest>=8.0",
   "rich>=13.7",
   "ruff>=0.6.0",
