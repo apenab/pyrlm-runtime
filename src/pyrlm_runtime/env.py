@@ -238,10 +238,8 @@ class PythonREPL:
         ``exec_timeout`` — only actual CPU spinning is. (A wall-clock timer here
         would conflate the two and abort legitimate subcalls.)
 
-        Because this is ITIMER_PROF, it is independent of the Vertex adapter's
-        wall-clock ITIMER_REAL guard: the two compose without either cancelling
-        the other, so an LLM call inside a REPL cell is still covered by Vertex's
-        own per-call wall-clock timeout.
+        An LLM call made from a REPL cell is bounded by its adapter's own
+        per-call timeout instead.
 
         Silently no-ops when not on Unix or not on the main thread (signal
         delivery only works there); the runtime keeps working but without

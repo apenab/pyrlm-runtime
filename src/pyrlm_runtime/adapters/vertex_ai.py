@@ -1,11 +1,10 @@
 """Vertex AI Gemini adapter for pyrlm_runtime.
 
-This adapter integrates Google Cloud Vertex AI's Gemini models with pyrlm_runtime,
-implementing the ModelAdapter protocol to provide LLM completion capabilities.
+This adapter calls Gemini on Google Cloud Vertex AI through the ``google-genai``
+SDK, implementing the ModelAdapter protocol.
 
 Requirements:
-    - google-cloud-aiplatform >= 1.60.0
-    - vertexai >= 1.60.0
+    - google-genai >= 1.66.0
     - Valid GCP authentication (Application Default Credentials or service account)
 
 Example:
@@ -26,20 +25,22 @@ Example:
 
 from __future__ import annotations
 
-import functools
 import logging
-import signal
-import threading
+import os
+import ssl
 import time
-from contextlib import contextmanager
-from typing import Any, Iterator
+import warnings
+from typing import Any
 
-import vertexai
-from vertexai.generative_models import GenerationConfig, GenerativeModel
+import httpx
+from google import genai
+from google.genai import errors, types
 
 from .base import ModelResponse, Usage
 
 logger = logging.getLogger(__name__)
+
+_RETRYABLE_STATUS_CODES = frozenset({429, 503, 504})
 
 
 class VertexAIAdapter:
@@ -51,10 +52,11 @@ class VertexAIAdapter:
     Attributes:
         project_id: GCP project ID
         location: GCP region (default: "us-central1")
-        model: Gemini model name (default: "gemini-2.5-pro")
-        timeout: Per-call deadline in seconds, on any thread
-        max_retries: Maximum number of retry attempts for transient errors
-        api_transport: SDK transport, "rest" (default) or "grpc"
+        model_name: Gemini model name (default: "gemini-2.5-pro")
+        timeout: Per-call timeout in seconds, on any thread
+        max_retries: Maximum number of attempts for transient errors
+        api_transport: Kept for compatibility. google-genai is REST only.
+        client: The ``google.genai.Client`` the adapter calls
     """
 
     def __init__(
@@ -73,23 +75,18 @@ class VertexAIAdapter:
             project_id: GCP project ID
             location: GCP region for Vertex AI
             model: Gemini model identifier
-            timeout: Per-call deadline in seconds, on any thread. It is passed to
-                the transport: gRPC treats it as an end-to-end deadline, REST as a
-                connect timeout plus a per-read inactivity timeout, so a REST
-                response that keeps streaming bytes can run longer. On the Unix
-                main thread a SIGALRM guard also enforces it end to end.
-                ``None`` or ``<= 0`` disables both.
-            max_retries: Max retry attempts for 429/503/504 errors
-            api_transport: SDK transport to use. ``"rest"`` (the default) uses
-                HTTP/REST, which honors ``HTTPS_PROXY`` and the system CA bundle
-                (``REQUESTS_CA_BUNDLE`` / ``SSL_CERT_FILE``) — required behind
-                corporate proxies with a self-signed TLS certificate — and is
-                immune to the gRPC pollset deadlock that ``_call_timeout_guard``
-                works around. ``"grpc"`` restores the previous transport.
-
-                NOTE: the transport is configured via ``vertexai.init``, which
-                writes process-global SDK state. Do not mix transports across
-                multiple adapters in the same process — the last ``init`` wins.
+            timeout: Per-call timeout in seconds, on any thread. It is sent as
+                ``HttpOptions(timeout=...)``: the HTTP client applies it to the
+                connect and to every read, so a server that stops replying fails
+                within it, and Vertex receives it as ``X-Server-Timeout``. A
+                response that keeps sending bytes can still run longer.
+                ``None`` or ``<= 0`` disables it.
+            max_retries: Max attempts for 429/503/504 errors and timeouts
+            api_transport: Accepted for compatibility. The google-genai SDK
+                speaks REST only, which honors ``HTTPS_PROXY`` and a custom CA
+                bundle (``SSL_CERT_FILE``, or ``REQUESTS_CA_BUNDLE`` when
+                ``SSL_CERT_FILE`` is unset). Any value other than ``"rest"``
+                emits a ``DeprecationWarning`` and REST is used.
             logger_instance: Optional custom logger
         """
         self.project_id = project_id
@@ -100,89 +97,24 @@ class VertexAIAdapter:
         self.api_transport = api_transport
         self.logger = logger_instance or logger
 
-        # Initialize Vertex AI. vertexai.init (not aiplatform.init) is what
-        # configures GenerativeModel, and it accepts api_transport so REST can
-        # be selected. A single init call sets project/location/transport.
-        vertexai.init(project=project_id, location=location, api_transport=api_transport)
+        if api_transport != "rest":
+            warnings.warn(
+                f"VertexAIAdapter(api_transport={api_transport!r}) is ignored: the "
+                "google-genai SDK supports REST only.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+        self.client = genai.Client(
+            vertexai=True,
+            project=project_id,
+            location=location,
+            http_options=_ca_bundle_http_options(),
+        )
         self.logger.info(
             f"Initialized VertexAI adapter: project={project_id}, "
-            f"location={location}, model={model}, transport={api_transport}"
+            f"location={location}, model={model}"
         )
-
-        # Initialize Gemini model
-        self._init_model()
-
-    def _init_model(self):
-        """Initialize or reinitialize the Gemini model instance."""
-        model = GenerativeModel(self.model_name)
-        if self.timeout is not None and self.timeout > 0:
-            self._bind_transport_timeout(model)
-        # Assigned after the bind: another thread may call the model as soon as it is visible.
-        self.model = model
-        self.logger.debug(f"Created GenerativeModel instance: {self.model_name}")
-
-    def _bind_transport_timeout(self, model: Any) -> None:
-        """``GenerativeModel.generate_content`` calls the GAPIC client without a
-        timeout and offers no way to pass one, so the request has no deadline.
-        ``_prediction_client`` is a private SDK attribute, so its absence degrades
-        to a warning.
-        """
-        try:
-            client = model._prediction_client
-            client.generate_content = functools.partial(
-                client.generate_content, timeout=self.timeout
-            )
-        except AttributeError:
-            self.logger.warning(
-                "VertexAI SDK has no GenerativeModel._prediction_client; the %ss timeout "
-                "applies only on the main thread, and calls from other threads may hang.",
-                self.timeout,
-            )
-
-    @contextmanager
-    def _call_timeout_guard(self) -> Iterator[None]:
-        """Wall-clock guard around a Vertex generate_content call.
-
-        Uses SIGALRM on Unix main thread to interrupt the underlying gRPC
-        ``poll()`` syscall. The motivation is real: long-running bench loops
-        on Vertex regularly deadlock inside gRPC's pollset_work waiting on a
-        condition that never arrives, with the main thread blocked in
-        ``poll()`` indefinitely.
-
-        No-op when not on the Unix main thread, where signals cannot be
-        delivered.
-        """
-        t = self.timeout
-        can_alarm = (
-            t is not None
-            and t > 0
-            and hasattr(signal, "SIGALRM")
-            and hasattr(signal, "setitimer")
-            and threading.current_thread() is threading.main_thread()
-        )
-        if not can_alarm:
-            yield
-            return
-
-        # If an outer SIGALRM/ITIMER_REAL timer is already armed (e.g. a nested
-        # Vertex call higher up the stack), do not arm a nested one: re-arming
-        # would cancel the outer timer when this block exits. Let the outer
-        # timeout cover this call instead. (The PythonREPL exec guard uses
-        # ITIMER_PROF, a different timer, so it does not interfere here.)
-        if signal.getitimer(signal.ITIMER_REAL)[0] > 0:
-            yield
-            return
-
-        def _on_alarm(signum: int, frame: Any) -> None:  # noqa: ARG001
-            raise TimeoutError(f"VertexAI generate_content exceeded {t}s (gRPC deadlock guard)")
-
-        old = signal.signal(signal.SIGALRM, _on_alarm)
-        signal.setitimer(signal.ITIMER_REAL, float(t))
-        try:
-            yield
-        finally:
-            signal.setitimer(signal.ITIMER_REAL, 0)
-            signal.signal(signal.SIGALRM, old)
 
     def complete(
         self,
@@ -203,146 +135,84 @@ class VertexAIAdapter:
             ModelResponse with text, usage, and model_id
 
         Raises:
-            Exception: On API errors after retries exhausted
+            TimeoutError: The last attempt timed out.
+            Exception: On other API errors, after retries for retryable ones.
         """
         self.logger.debug(
             f"complete() called: messages={len(messages)}, "
             f"max_tokens={max_tokens}, temperature={temperature}"
         )
 
-        # Convert OpenAI-style messages to Gemini format
         contents = self._convert_messages(messages)
-
-        # Configure generation
-        generation_config = GenerationConfig(
+        config = types.GenerateContentConfig(
             max_output_tokens=max_tokens,
             temperature=temperature,
+            http_options=types.HttpOptions(timeout=self._timeout_ms()),
         )
 
-        # Attempt generation with retry logic
-        last_error = None
-        for attempt in range(self.max_retries):
+        attempts = max(1, self.max_retries)
+        for attempt in range(1, attempts + 1):
+            start_time = time.time()
             try:
-                start_time = time.time()
-
-                with self._call_timeout_guard():
-                    response = self.model.generate_content(
-                        contents,
-                        generation_config=generation_config,
-                    )
-
-                elapsed = time.time() - start_time
-
-                # Extract text — response.text raises ValueError when:
-                # - finish_reason=MAX_TOKENS with zero output parts
-                # - response has multiple text parts (code block + FINAL_VAR sentinel)
-                text = self._extract_text(response)
-
-                # Extract usage metadata if available
-                usage = self._extract_usage(response, text, messages)
-
-                # Build response meta (finish_reason, content_kind, reasoning_present).
-                # The RLM root loop relies on meta["finish_reason"] to detect
-                # truncation; without it the truncation-handling branch is dead.
-                meta = self._build_meta(response, text)
-
-                self.logger.info(
-                    f"Completion successful: {usage.total_tokens} tokens, {elapsed:.2f}s"
+                response = self.client.models.generate_content(
+                    model=self.model_name, contents=contents, config=config
                 )
-
-                return ModelResponse(
-                    text=text,
-                    usage=usage,
-                    model_id=self.model_name,
-                    meta=meta,
-                )
-
-            except TimeoutError as exc:
-                last_error = exc
-                self.logger.warning(
-                    "VertexAI call timed out after %ss (attempt %d/%d); "
-                    "re-initializing model to recover from stale gRPC state.",
-                    self.timeout,
-                    attempt + 1,
-                    self.max_retries,
-                )
-                self._init_model()
-                if attempt < self.max_retries - 1:
-                    time.sleep(2 ** (attempt + 1))
-                    continue
-                self.logger.error("VertexAI call timed out after all retries")
-                raise
-
             except Exception as exc:
-                last_error = exc
-                error_msg = str(exc).lower()
-
-                # Check if error is retryable
-                if any(code in error_msg for code in ["429", "503", "504", "timeout"]):
-                    backoff_delay = 2 ** (attempt + 1)  # Exponential backoff
+                is_timeout = isinstance(exc, (httpx.TimeoutException, TimeoutError))
+                retryable = is_timeout or (
+                    isinstance(exc, errors.APIError) and exc.code in _RETRYABLE_STATUS_CODES
+                )
+                if retryable and attempt < attempts:
+                    backoff_delay = 2**attempt
                     self.logger.warning(
-                        f"Retryable error (attempt {attempt + 1}/{self.max_retries}): {exc}. "
+                        f"Retryable error (attempt {attempt}/{attempts}): {exc!r}. "
                         f"Retrying in {backoff_delay}s..."
                     )
-                    if attempt < self.max_retries - 1:
-                        time.sleep(backoff_delay)
-                        continue
-
-                # Non-retryable error or retries exhausted
-                self.logger.error(f"Completion failed: {exc}", exc_info=True)
+                    time.sleep(backoff_delay)
+                    continue
+                self.logger.error(f"Completion failed: {exc!r}")
+                if is_timeout:
+                    raise TimeoutError(
+                        f"VertexAI generate_content timed out after {self.timeout}s"
+                    ) from exc
                 raise
 
-        # Should not reach here, but handle exhausted retries
-        raise last_error
+            elapsed = time.time() - start_time
+            text = self._extract_text(response)
+            usage = self._extract_usage(response, text, messages)
+            # The RLM root loop relies on meta["finish_reason"] to detect
+            # truncation; without it the truncation-handling branch is dead.
+            meta = self._build_meta(response, text)
+            self.logger.info(f"Completion successful: {usage.total_tokens} tokens, {elapsed:.2f}s")
+            return ModelResponse(text=text, usage=usage, model_id=self.model_name, meta=meta)
+
+        raise AssertionError("unreachable: the loop returns or raises")
+
+    def _timeout_ms(self) -> int | None:
+        if self.timeout is None or self.timeout <= 0:
+            return None
+        return max(1, round(self.timeout * 1000))
 
     def _extract_text(self, response: Any) -> str:
-        """Extract text from Gemini response, handling edge cases.
+        """Join the answer text parts of the first candidate with newlines.
 
-        response.text raises ValueError when:
-        - finish_reason=MAX_TOKENS with no output parts (empty response)
-        - response has multiple text parts (code block + FINAL_VAR sentinel)
-
-        In the multi-part case we join all text parts; in the empty case we
-        return "" so the caller can treat it as an empty completion.
+        Thinking parts (``part.thought``) and parts without text (for example a
+        function call) are skipped. A response with no candidates or no parts,
+        as with ``finish_reason=MAX_TOKENS``, yields ``""``.
         """
-        try:
-            text = response.text
-            return text if text else ""
-        except ValueError:
-            pass
-
-        # Fallback: extract parts manually from candidates
-        try:
-            candidates = response.candidates
-            if not candidates:
-                return ""
-            parts = candidates[0].content.parts if candidates[0].content else []
-            if not parts:
-                finish = getattr(candidates[0], "finish_reason", None)
-                if finish is not None:
-                    self.logger.warning(
-                        f"Empty response parts (finish_reason={finish}), returning empty text"
-                    )
-                return ""
-            # Join all answer text parts (handles multi-part responses). Read each
-            # part defensively: a non-text part (e.g. a function_call) can raise
-            # when its .text is accessed, and one bad part must not discard the
-            # good text parts alongside it. Skip thinking parts (part.thought is
-            # True on Gemini 2.5 thinking models) so the reasoning summary does
-            # not leak into the visible answer text.
-            texts = []
-            for p in parts:
-                try:
-                    if getattr(p, "thought", False):
-                        continue
-                    if hasattr(p, "text") and p.text:
-                        texts.append(p.text)
-                except Exception:
-                    continue
-            return "\n".join(texts)
-        except Exception as exc:
-            self.logger.warning(f"Could not extract text from response parts: {exc}")
+        candidates = response.candidates or []
+        if not candidates:
             return ""
+        content = candidates[0].content
+        parts = (content.parts if content else None) or []
+        if not parts:
+            finish = candidates[0].finish_reason
+            if finish is not None:
+                self.logger.warning(
+                    f"Empty response parts (finish_reason={finish}), returning empty text"
+                )
+            return ""
+        return "\n".join(p.text for p in parts if p.text and not p.thought)
 
     def _build_meta(self, response: Any, text: str) -> dict[str, Any]:
         """Build ModelResponse.meta from a Gemini response.
@@ -361,17 +231,12 @@ class VertexAIAdapter:
         """
         finish_reason = None
         reasoning_present = False
-        try:
-            candidates = getattr(response, "candidates", None) or []
-            if candidates:
-                finish_reason = self._normalize_finish_reason(
-                    getattr(candidates[0], "finish_reason", None)
-                )
-                content = getattr(candidates[0], "content", None)
-                parts = getattr(content, "parts", []) if content else []
-                reasoning_present = any(getattr(p, "thought", False) for p in parts)
-        except Exception as exc:
-            self.logger.debug(f"Could not build response meta: {exc}")
+        candidates = response.candidates or []
+        if candidates:
+            finish_reason = self._normalize_finish_reason(candidates[0].finish_reason)
+            content = candidates[0].content
+            parts = (content.parts if content else None) or []
+            reasoning_present = any(p.thought for p in parts)
 
         return {
             "finish_reason": finish_reason,
@@ -400,8 +265,8 @@ class VertexAIAdapter:
         OpenAI roles: system, user, assistant
         Gemini roles: user, model
 
-        System messages are prepended to the first user message to ensure
-        compatibility across all Vertex AI SDK versions.
+        System messages are prepended to the first user message, which keeps
+        the prompt the model sees identical to earlier releases of this adapter.
 
         Args:
             messages: List with "role" and "content" keys
@@ -421,71 +286,47 @@ class VertexAIAdapter:
             content = msg.get("content", "")
 
             if role == "system":
-                # Collect system messages to prepend to first user message
                 system_instructions.append(content)
             elif role == "user":
                 contents.append({"role": "user", "parts": [{"text": content}]})
             elif role == "assistant":
-                # Gemini uses "model" role for assistant messages
                 contents.append({"role": "model", "parts": [{"text": content}]})
             else:
                 self.logger.warning(f"Unknown role '{role}', treating as user")
                 contents.append({"role": "user", "parts": [{"text": content}]})
 
-        # Prepend system instructions to first user message
         if system_instructions and contents:
             combined_instruction = "\n\n".join(system_instructions)
-            # Find first user message
-            for i, content_msg in enumerate(contents):
+            for content_msg in contents:
                 if content_msg["role"] == "user":
                     original_text = content_msg["parts"][0]["text"]
-                    contents[i]["parts"][0]["text"] = f"{combined_instruction}\n\n{original_text}"
+                    content_msg["parts"][0]["text"] = f"{combined_instruction}\n\n{original_text}"
                     break
 
         return contents
 
     def _extract_usage(self, response: Any, text: str, messages: list[dict[str, str]]) -> Usage:
-        """Extract token usage from Gemini response.
+        """Extract token usage from ``response.usage_metadata``.
 
-        Gemini API provides usage metadata in response.usage_metadata.
-        Falls back to estimation if not available.
-
-        Args:
-            response: Gemini API response object
-            text: Generated text
-            messages: Original messages for prompt token estimation
-
-        Returns:
-            Usage object with token counts
+        Gemini 2.5 thinking models report reasoning tokens in
+        ``thoughts_token_count``, which ``candidates_token_count`` excludes and
+        ``total_token_count`` includes. They are folded into completion tokens
+        so prompt + completion == total and reasoning cost is not undercounted.
+        Falls back to a word-count estimate when there is no usage metadata.
         """
-        try:
-            if hasattr(response, "usage_metadata") and response.usage_metadata:
-                usage_meta = response.usage_metadata
-                prompt_tokens = getattr(usage_meta, "prompt_token_count", 0)
-                completion_tokens = getattr(usage_meta, "candidates_token_count", 0)
-                total_tokens = getattr(usage_meta, "total_token_count", 0)
+        usage_meta = response.usage_metadata
+        if usage_meta:
+            prompt_tokens = usage_meta.prompt_token_count or 0
+            completion_tokens = (usage_meta.candidates_token_count or 0) + (
+                usage_meta.thoughts_token_count or 0
+            )
+            total_tokens = usage_meta.total_token_count or prompt_tokens + completion_tokens
+            return Usage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+            )
 
-                # Gemini 2.5 thinking models report reasoning tokens separately
-                # in thoughts_token_count; candidates_token_count excludes them
-                # while total_token_count includes them. Fold thoughts into
-                # completion so prompt + completion == total and the cost of
-                # reasoning is not undercounted.
-                thoughts_tokens = getattr(usage_meta, "thoughts_token_count", 0) or 0
-                completion_tokens += thoughts_tokens
-
-                # If total not provided, calculate it
-                if total_tokens == 0:
-                    total_tokens = prompt_tokens + completion_tokens
-
-                return Usage(
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    total_tokens=total_tokens,
-                )
-        except Exception as exc:
-            self.logger.debug(f"Could not extract usage metadata: {exc}")
-
-        # Fallback: estimate tokens
         prompt_tokens = self._estimate_tokens(messages)
         completion_tokens = self._estimate_tokens(text)
         return Usage(
@@ -508,3 +349,14 @@ class VertexAIAdapter:
         if isinstance(text, list):
             return sum(len(str(msg.get("content", "")).split()) for msg in text)
         return len(str(text).split())
+
+
+def _ca_bundle_http_options() -> types.HttpOptions | None:
+    """google-genai reads ``SSL_CERT_FILE`` but not ``REQUESTS_CA_BUNDLE``, which
+    the requests-based SDK this adapter used before honored. Keep honoring it.
+    """
+    bundle = os.environ.get("REQUESTS_CA_BUNDLE")
+    if not bundle or os.environ.get("SSL_CERT_FILE"):
+        return None
+    ctx = ssl.create_default_context(cafile=bundle, capath=os.environ.get("SSL_CERT_DIR"))
+    return types.HttpOptions(client_args={"verify": ctx})

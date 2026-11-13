@@ -60,7 +60,7 @@ This will install:
 
 - `pyrlm-runtime` (from source)
 - `rlm-minimal` (from source at `/Users/U01AB0B5/projects/rlm-minimal`)
-- `google-cloud-aiplatform` and `vertexai`
+- `google-genai` (used by `VertexAIAdapter`) and `google-cloud-aiplatform` (used by the rlm-minimal adapter)
 - `datasets` and `python-dateutil` (for Oolong datasets)
 
 ### 3. Verify Setup
@@ -330,6 +330,15 @@ Error: Could not automatically determine credentials
 gcloud ai models list --region=us-central1
 ```
 
+### Behind a Corporate Proxy
+
+```
+[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate
+```
+
+**Solution**: Set `HTTPS_PROXY` to the proxy URL, and point `SSL_CERT_FILE` (or
+`REQUESTS_CA_BUNDLE`) at a PEM bundle that includes the proxy's CA certificate.
+
 ### Out of Memory / Timeout
 
 **For large contexts (>100K)**:
@@ -370,8 +379,11 @@ After running the benchmark:
   - Implements `ModelAdapter` protocol for pyrlm_runtime
   - Returns `ModelResponse` with usage metrics
   - Handles retry logic and message conversion
+  - Calls Gemini through the `google-genai` SDK over REST, with a per-call
+    `timeout` that holds on any thread
 
 - **`VertexAIClientForRLMMinimal`** (`examples/vertex_adapter_for_rlm_minimal.py`):
+  - Still uses the deprecated `vertexai.generative_models` SDK
   - Compatible with rlm-minimal's `OpenAIClient` interface
   - Returns plain `str` (no metadata)
   - **`InstrumentedVertexAIClient`**: Subclass that tracks tokens/latency

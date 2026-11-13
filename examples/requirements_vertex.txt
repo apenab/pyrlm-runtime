@@ -4,9 +4,10 @@
 # Core pyrlm-runtime (install from source)
 -e .
 
-# Google Cloud Vertex AI
+# Google Cloud Vertex AI. VertexAIAdapter uses google-genai; the rlm-minimal
+# adapter in this folder still uses vertexai.generative_models.
+google-genai>=1.66.0,<3
 google-cloud-aiplatform>=1.60.0
-vertexai>=1.60.0
 
 # Dataset loading
 datasets>=2.14.0
