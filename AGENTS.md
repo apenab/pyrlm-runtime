@@ -29,6 +29,7 @@ Minimal runtime for Recursive Language Models (RLMs). Python 3.12+, MIT license.
 - Framework: **pytest**
 - Tests that require `pydantic-monty`: use `@pytest.mark.skipif(not MONTY_AVAILABLE, ...)`
 - Use `FakeAdapter` (from `pyrlm_runtime.adapters`) for RLM integration tests
+- Tests that require the `mcp` extra: `pytest.importorskip("mcp")` at module top; the dev group installs it
 
 ### Regression tests rule
 
@@ -42,6 +43,21 @@ Two interchangeable backends via `REPLProtocol`:
 - `"monty"`: MontyREPL using pydantic-monty (Rust interpreter, secure)
 
 Both expose: `exec(code) -> ExecResult`, `get(name)`, `set(name, value)`
+
+## MCP server
+
+`src/pyrlm_runtime/mcp_server/` is an optional MCP server behind the `mcp`
+extra (`pip install "pyrlm-runtime[mcp]"`). Rules:
+
+- It imports only the public API of `pyrlm_runtime`, like an external consumer.
+- `service.py` holds the logic and never imports `mcp`; `server.py` is the thin
+  MCP adapter.
+- Tools are published by capability through the table in `server.py`.
+- Importing `pyrlm_runtime` must not import `mcp` (`tests/test_mcp_imports.py`).
+- On stdio, stdout is the protocol channel: log to stderr and never run a
+  `PythonREPL` in the server process.
+
+Design: `docs/MCP-SERVER-RFC.md`. User guide: `docs/MCP.md`.
 
 ## Key patterns
 
