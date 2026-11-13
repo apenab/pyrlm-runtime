@@ -258,3 +258,11 @@ def test_http_cli_logs_to_stderr_and_never_logs_a_query_string():
     assert b"/mcp" in stderr
     assert b"QUERY-SECRET" not in stderr
     assert b"probe=1" not in stderr
+
+
+def test_security_policy_names_the_unauthenticated_opt_out():
+    from pathlib import Path
+
+    policy = (Path(__file__).resolve().parents[1] / "SECURITY.md").read_text()
+
+    assert "PYRLM_MCP_ALLOW_UNAUTHENTICATED" in policy
