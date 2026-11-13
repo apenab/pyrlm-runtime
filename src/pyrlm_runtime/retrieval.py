@@ -651,6 +651,9 @@ class ElasticsearchRetriever:
     _result_cache: _TTLCache | None = field(default=None, init=False, repr=False)
     _supports_rrf: bool | None = field(default=None, init=False, repr=False)
     _supports_id_secondary_sort: bool | None = field(default=None, init=False, repr=False)
+    _client_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if self.cache_embeddings and self.embedding_cache_size <= 0:
@@ -672,6 +675,12 @@ class ElasticsearchRetriever:
     def _get_client(self) -> Any:
         if self._client is not None:
             return self._client
+        with self._client_lock:
+            if self._client is None:
+                self._client = self._build_client()
+        return self._client
+
+    def _build_client(self) -> Any:
         try:
             from elasticsearch import Elasticsearch
         except ImportError as exc:
@@ -706,8 +715,7 @@ class ElasticsearchRetriever:
             kwargs["verify_certs"] = self.verify_certs
 
         kwargs["ssl_show_warn"] = False
-        self._client = Elasticsearch(**kwargs)
-        return self._client
+        return Elasticsearch(**kwargs)
 
     def _preview(self, text: str) -> str:
         if len(text) <= self.preview_length:
