@@ -25,11 +25,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import threading
 from typing import Any
 
 from .adapters.base import ModelAdapter
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +185,13 @@ class QueryRewriter:
             {"role": "system", "content": self._system_prompt},
             {"role": "user", "content": query},
         ]
-        response = self._adapter.complete(messages, max_tokens=self._max_tokens)
+        try:
+            response = self._adapter.complete(messages, max_tokens=self._max_tokens)
+        except Exception:
+            logger.warning(
+                "QueryRewriter adapter call failed; returning no rewrites", exc_info=True
+            )
+            return []
         with self._lock:
             self._calls += 1
         text = getattr(response, "text", None)
