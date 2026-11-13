@@ -1,12 +1,10 @@
 """Regression tests for VertexAIAdapter._extract_text.
 
-The vertexai ``response.text`` accessor raises ``ValueError`` when the response
-has multiple parts (code block + FINAL_VAR sentinel, which the RLM routinely
-emits) or zero parts (finish_reason=MAX_TOKENS). ``_extract_text`` must degrade
-gracefully in those cases instead of letting the ValueError propagate.
-
-These tests call ``_extract_text`` on an un-initialized instance (``__new__``)
-so they never touch the network or GCP credentials.
+The RLM routinely gets multi-part responses (code block + FINAL_VAR sentinel),
+empty ones (finish_reason=MAX_TOKENS), and thinking parts from Gemini 2.5.
+``_extract_text`` must join the answer parts, skip the rest, and never raise.
+Responses are real ``google.genai`` types parsed from wire-format JSON, and the
+adapter is built with ``__new__`` so no network or GCP credentials are touched.
 """
 
 from __future__ import annotations
@@ -16,117 +14,61 @@ import logging
 import pytest
 
 try:
+    from google.genai import types
+
     from pyrlm_runtime.adapters.vertex_ai import VertexAIAdapter
 
     VERTEX_AVAILABLE = True
-except Exception:  # pragma: no cover - vertex deps missing
+except ImportError:  # pragma: no cover - google-genai missing
     VERTEX_AVAILABLE = False
 
-pytestmark = pytest.mark.skipif(not VERTEX_AVAILABLE, reason="vertexai not installed")
+pytestmark = pytest.mark.skipif(not VERTEX_AVAILABLE, reason="google-genai not installed")
 
 
 def _adapter() -> "VertexAIAdapter":
-    """Build an adapter without running __init__ (no network / GCP creds)."""
     adapter = VertexAIAdapter.__new__(VertexAIAdapter)
     adapter.logger = logging.getLogger("test_vertex")
     return adapter
 
 
-class _Part:
-    def __init__(self, text: str, thought: bool = False) -> None:
-        self.text = text
-        self.thought = thought
-
-
-class _Content:
-    def __init__(self, parts: list[_Part]) -> None:
-        self.parts = parts
-
-
-class _Candidate:
-    def __init__(self, parts: list[_Part], finish_reason: object = None) -> None:
-        self.content = _Content(parts)
-        self.finish_reason = finish_reason
-
-
-class _Response:
-    """Fake Gemini response. ``text`` raises ValueError when ``raises`` is set."""
-
-    def __init__(
-        self,
-        *,
-        text: str | None = None,
-        raises: bool = False,
-        candidates: list[_Candidate] | None = None,
-    ) -> None:
-        self._text = text
-        self._raises = raises
-        self.candidates = candidates if candidates is not None else []
-
-    @property
-    def text(self) -> str:
-        if self._raises:
-            raise ValueError("Multiple content parts are not supported")
-        return self._text or ""
+def _response(parts: list[dict] | None, finish_reason: str | None = "STOP"):
+    candidate: dict = {}
+    if parts is not None:
+        candidate["content"] = {"role": "model", "parts": parts}
+    if finish_reason:
+        candidate["finishReason"] = finish_reason
+    return types.GenerateContentResponse.model_validate({"candidates": [candidate]})
 
 
 def test_extract_text_simple() -> None:
-    """Single-part response returns its text unchanged."""
-    assert _adapter()._extract_text(_Response(text="hello world")) == "hello world"
+    assert _adapter()._extract_text(_response([{"text": "hello world"}])) == "hello world"
 
 
-def test_extract_text_empty_returns_empty_string() -> None:
-    """response.text == '' returns '' (not None)."""
-    assert _adapter()._extract_text(_Response(text="")) == ""
+def test_extract_text_empty_text_returns_empty_string() -> None:
+    assert _adapter()._extract_text(_response([{"text": ""}])) == ""
 
 
 def test_extract_text_multipart_joins_parts() -> None:
-    """When response.text raises (multi-part), parts are joined — no exception."""
-    resp = _Response(
-        raises=True,
-        candidates=[_Candidate([_Part("print(42)"), _Part("FINAL_VAR: ans")])],
-    )
+    resp = _response([{"text": "print(42)"}, {"text": "FINAL_VAR: ans"}])
     assert _adapter()._extract_text(resp) == "print(42)\nFINAL_VAR: ans"
 
 
 def test_extract_text_max_tokens_no_parts_returns_empty() -> None:
-    """finish_reason=MAX_TOKENS with no parts returns '' instead of raising."""
-    resp = _Response(raises=True, candidates=[_Candidate([], finish_reason="MAX_TOKENS")])
-    assert _adapter()._extract_text(resp) == ""
+    assert _adapter()._extract_text(_response(None, finish_reason="MAX_TOKENS")) == ""
 
 
 def test_extract_text_no_candidates_returns_empty() -> None:
-    """No candidates at all returns '' instead of raising."""
-    assert _adapter()._extract_text(_Response(raises=True, candidates=[])) == ""
+    resp = types.GenerateContentResponse.model_validate({})
+    assert _adapter()._extract_text(resp) == ""
 
 
-class _RaisingPart:
-    """A non-text part (e.g. a function_call) whose ``.text`` raises."""
-
-    @property
-    def text(self) -> str:
-        raise ValueError("Part has no text (function_call)")
-
-
-def test_extract_text_skips_bad_part_keeps_good_parts() -> None:
-    """Regression: one part that raises on ``.text`` access must not discard the
-    surrounding good text parts. Before the fix the whole list comprehension
-    raised and the fallback returned '' — losing the real output."""
-    resp = _Response(
-        raises=True,
-        candidates=[_Candidate([_Part("good output"), _RaisingPart()])],
-    )
+def test_extract_text_skips_non_text_part_keeps_good_parts() -> None:
+    """A function_call part must not discard the text parts around it."""
+    resp = _response([{"text": "good output"}, {"functionCall": {"name": "f", "args": {}}}])
     assert _adapter()._extract_text(resp) == "good output"
 
 
 def test_extract_text_skips_thought_part() -> None:
-    """Regression: Gemini 2.5 thinking models emit a reasoning part
-    (part.thought=True) alongside the answer. The thinking summary must NOT
-    leak into the visible answer text."""
-    resp = _Response(
-        raises=True,
-        candidates=[
-            _Candidate([_Part("internal reasoning...", thought=True), _Part("the answer")])
-        ],
-    )
+    """The thinking summary of a Gemini 2.5 model must not leak into the answer."""
+    resp = _response([{"text": "internal reasoning...", "thought": True}, {"text": "the answer"}])
     assert _adapter()._extract_text(resp) == "the answer"

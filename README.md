@@ -400,8 +400,8 @@ Auto-retries on 429, 500, 502, 503, 504 with exponential backoff. Supports conte
 
 #### VertexAIAdapter
 
-Google Cloud Vertex AI (Gemini). Requires `google-cloud-aiplatform` / `vertexai`
-and GCP credentials (ADC or a service account).
+Google Cloud Vertex AI (Gemini), called through the `google-genai` SDK. Requires
+GCP credentials (ADC or a service account).
 
 ```python
 from pyrlm_runtime.adapters import VertexAIAdapter
@@ -410,25 +410,30 @@ adapter = VertexAIAdapter(
     project_id="my-gcp-project",
     location="us-central1",
     model="gemini-2.5-pro",
-    api_transport="rest",   # default; use "grpc" to opt back into gRPC
+    timeout=600,     # seconds per call, on any thread
+    max_retries=3,
 )
 ```
 
-`api_transport` defaults to **`"rest"`**: REST honors `HTTPS_PROXY` and the
-system CA bundle (`REQUESTS_CA_BUNDLE` / `SSL_CERT_FILE`) — required behind
-corporate proxies with a self-signed TLS certificate — and is immune to the
-gRPC pollset deadlock that long-running loops hit. Pass `api_transport="grpc"`
-to restore the previous gRPC transport. The transport is configured via
-`vertexai.init`, which is **process-global SDK state**: do not mix transports
-across multiple adapters in the same process — the last `init` wins.
+The SDK speaks REST over HTTPS. It honors `HTTPS_PROXY`, and it trusts a custom
+CA bundle from `SSL_CERT_FILE`. The adapter also honors `REQUESTS_CA_BUNDLE`
+when `SSL_CERT_FILE` is unset. Set one of them behind a corporate proxy that
+re-signs TLS with its own certificate. Each adapter owns its own client, so
+adapters with different projects or regions can share a process.
 
-`timeout` (default `600` seconds) is a per-call deadline that holds on any
+`api_transport` is kept so existing callers keep working, but REST is the only
+transport. `"rest"` (the default) is silent. Any other value, such as `"grpc"`,
+emits a `DeprecationWarning` and the adapter uses REST.
+
+`timeout` (default `600` seconds) is a per-call timeout that holds on any
 thread, so calls made from worker threads (for example an MCP server's) cannot
-hang forever. The adapter passes it to the transport: gRPC applies it end to
-end; REST applies it as a connect timeout plus a per-read inactivity timeout, so
-a response that keeps sending bytes can take longer. On the Unix main thread a
-SIGALRM guard also enforces it end to end. A timed-out call is retried like
-other transient errors, up to `max_retries` attempts.
+hang forever. The adapter sends it as `HttpOptions(timeout=...)`. The HTTP
+client applies it to the connect and to every read, so a server that stops
+replying fails within `timeout`, and Vertex receives it as `X-Server-Timeout`.
+A response that keeps sending bytes can take longer. `None` or `<= 0` disables
+it. A timed-out call is retried like 429, 503 and 504 errors, up to
+`max_retries` attempts in total. If the last attempt times out, `complete`
+raises `TimeoutError`.
 
 The adapter normalizes Gemini's finish reasons to the loop's vocabulary
 (`MAX_TOKENS` → `"length"`, `STOP` → `"stop"`) in `ModelResponse.meta`, skips

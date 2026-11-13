@@ -1,81 +1,81 @@
+"""Regression tests for the VertexAIAdapter per-call timeout.
+
+A call to a server that never replies must fail within ``timeout`` on any
+thread, including worker threads where no signal-based guard can run (an MCP
+server calls ``complete`` from one).
+"""
+
 from __future__ import annotations
 
-import socket
 import threading
 import time
 
 import pytest
 
 try:
-    import requests
-    from google.auth.credentials import AnonymousCredentials
-    from google.cloud.aiplatform import initializer
-
     from pyrlm_runtime.adapters import vertex_ai
 
     VERTEX_AVAILABLE = True
 except ImportError:
     VERTEX_AVAILABLE = False
 
-pytestmark = pytest.mark.skipif(not VERTEX_AVAILABLE, reason="vertexai not installed")
+pytestmark = pytest.mark.skipif(not VERTEX_AVAILABLE, reason="google-genai not installed")
 
 TIMEOUT_S = 0.3
 
 
-@pytest.fixture
-def hang_endpoint():
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.bind(("127.0.0.1", 0))
-    srv.listen(8)
-    conns: list[socket.socket] = []
-
-    def accept_forever() -> None:
-        while True:
-            try:
-                conn, _ = srv.accept()
-            except OSError:
-                return
-            conns.append(conn)
-
-    threading.Thread(target=accept_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{srv.getsockname()[1]}"
-    srv.close()
-    for conn in conns:
-        conn.close()
+def _timed_call(adapter) -> dict:
+    outcome: dict = {}
+    start = time.monotonic()
+    try:
+        adapter.complete([{"role": "user", "content": "hi"}])
+    except TimeoutError as exc:
+        outcome["exc"] = exc
+    outcome["elapsed"] = time.monotonic() - start
+    return outcome
 
 
-@pytest.fixture
-def isolated_vertex_config(monkeypatch):
-    # vertexai.init is the old config's bound method, so rebind it as well.
-    config = initializer._Config()
-    monkeypatch.setattr(initializer, "global_config", config)
-    monkeypatch.setattr(vertex_ai.vertexai, "init", config.init)
-
-
-def test_worker_thread_call_times_out(hang_endpoint, isolated_vertex_config) -> None:
-    vertex_ai.vertexai.init(
-        project="p",
-        location="us-central1",
-        api_transport="rest",
-        api_endpoint=hang_endpoint,
-        credentials=AnonymousCredentials(),
-    )
+def test_worker_thread_call_times_out(hang_server, vertex_base_url) -> None:
+    vertex_base_url(hang_server[0])
     adapter = vertex_ai.VertexAIAdapter(project_id="p", timeout=TIMEOUT_S, max_retries=1)
 
     outcome: dict = {}
-
-    def call() -> None:
-        start = time.monotonic()
-        try:
-            adapter.complete([{"role": "user", "content": "hi"}])
-        except requests.exceptions.Timeout as exc:
-            outcome["exc"] = exc
-        outcome["elapsed"] = time.monotonic() - start
-
-    worker = threading.Thread(target=call, daemon=True)
+    worker = threading.Thread(target=lambda: outcome.update(_timed_call(adapter)), daemon=True)
     worker.start()
     worker.join(TIMEOUT_S + 3)
 
     assert not worker.is_alive(), "complete() hung in a worker thread past its timeout"
     assert "exc" in outcome
     assert outcome["elapsed"] < TIMEOUT_S + 2
+
+
+def test_main_thread_call_times_out(hang_server, vertex_base_url) -> None:
+    vertex_base_url(hang_server[0])
+    adapter = vertex_ai.VertexAIAdapter(project_id="p", timeout=TIMEOUT_S, max_retries=1)
+
+    outcome = _timed_call(adapter)
+
+    assert "exc" in outcome
+    assert outcome["elapsed"] < TIMEOUT_S + 2
+
+
+def test_timeout_is_sent_to_the_server(hang_server, vertex_base_url) -> None:
+    url, received = hang_server
+    vertex_base_url(url)
+    adapter = vertex_ai.VertexAIAdapter(project_id="p", timeout=TIMEOUT_S, max_retries=1)
+
+    _timed_call(adapter)
+
+    assert b"x-server-timeout: 1" in received[0].lower()
+
+
+def test_timed_out_call_is_retried(hang_server, vertex_base_url, monkeypatch) -> None:
+    url, received = hang_server
+    vertex_base_url(url)
+    monkeypatch.setattr(vertex_ai.time, "sleep", lambda s: None)
+    adapter = vertex_ai.VertexAIAdapter(project_id="p", timeout=TIMEOUT_S, max_retries=2)
+
+    outcome = _timed_call(adapter)
+
+    assert "exc" in outcome
+    assert len(received) == 2
