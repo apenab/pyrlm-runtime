@@ -19,8 +19,6 @@ from pyrlm_runtime import RetrieverProtocol
 from .config import SearchMode, ServerConfig
 from .schemas import DocumentResponse, Page, PagesResponse, SearchHit, SearchResponse
 
-_PREVIEW_FALLBACK_CHARS = 500
-
 MAX_PAGE_NUMBER = 1_000_000
 """Largest page number ``get_pages`` accepts; pages count from 1."""
 
@@ -147,7 +145,7 @@ class RetrievalService:
         raw = self._lookup(doc_id)
         text = str(raw.get("content") or "")
         end = offset_applied + max_chars_applied
-        return DocumentResponse(
+        response = DocumentResponse(
             doc_id=str(raw.get("doc_id", doc_id)),
             content=text[offset_applied:end],
             offset=offset_applied,
@@ -156,6 +154,9 @@ class RetrievalService:
             total_chars=len(text),
             metadata=self._metadata(raw),
         )
+        if _size(response) > self._config.max_response_chars:
+            response = response.model_copy(update={"metadata": {}, "truncated": True})
+        return response
 
     def get_pages(
         self, logical_doc_id: str, *, pages: Sequence[int], radius: int = 0
@@ -231,7 +232,7 @@ class RetrievalService:
         text = str(raw.get("content") or "")
         preview = raw.get("preview")
         if preview is None:
-            preview = text[:_PREVIEW_FALLBACK_CHARS]
+            preview = text
         content, content_truncated = None, False
         if include_content:
             content, content_truncated = _truncate(text, self._config.max_content_chars)
@@ -241,7 +242,7 @@ class RetrievalService:
             logical_doc_id=None if logical_doc_id is None else str(logical_doc_id),
             page_num=raw.get("page_num"),
             score=raw.get("score"),
-            preview=str(preview),
+            preview=str(preview)[: self._config.max_preview_chars],
             content=content,
             content_truncated=content_truncated,
             metadata=self._metadata(raw),
@@ -289,11 +290,15 @@ def _truncate(text: str, limit: int) -> tuple[str, bool]:
     return text[:limit], True
 
 
+def _size(model: BaseModel) -> int:
+    return len(json.dumps(model.model_dump(mode="json"), ensure_ascii=False))
+
+
 def _fit(items: list[_ModelT], budget: int) -> tuple[list[_ModelT], bool]:
     """Keep the longest prefix of ``items`` whose serialised size fits ``budget``."""
     used = 0
     for index, item in enumerate(items):
-        used += len(json.dumps(item.model_dump(mode="json"), ensure_ascii=False))
+        used += _size(item)
         if used > budget:
             return items[:index], True
     return items, False

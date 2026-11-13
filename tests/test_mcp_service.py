@@ -256,3 +256,29 @@ class TestWildcardFilterKeys:
 
         with pytest.raises(InvalidRequest, match="wildcard"):
             service.search("revenue", filters={key: {"exists": True}})
+
+
+class TestUnboundedRetrieverFields:
+    def test_a_long_retriever_preview_is_capped(self):
+        docs = [{"doc_id": "x", "content": "revenue", "metadata": {}}]
+        retriever = InMemoryRetriever(docs)
+        retriever._hits["x"]["preview"] = "p" * 5000
+
+        hit = _service(retriever, max_preview_chars=100).search("revenue").results[0]
+
+        assert hit.preview == "p" * 100
+        assert retriever._hits["x"]["preview"] == "p" * 5000
+
+    def test_get_document_leaves_out_metadata_that_breaks_the_response_cap(self):
+        docs = [{"doc_id": "x", "content": "short", "metadata": {"blob": "m" * 5000}}]
+        service = _service(InMemoryRetriever(docs), max_response_chars=1000)
+
+        response = service.get_document("x")
+
+        assert (response.content, response.metadata, response.truncated) == ("short", {}, True)
+
+    def test_get_document_keeps_metadata_that_fits(self):
+        response = _service().get_document("a-p1")
+
+        assert response.metadata == {"doc_id": "a", "page_num": 1}
+        assert response.truncated is False

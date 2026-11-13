@@ -107,9 +107,10 @@ set to an empty value is an empty list, which differs from leaving it unset.
 | `RETRIEVER_FACTORY` | none | `pkg.module:callable` that returns a `RetrieverProtocol` object. Called once, with no arguments. Exclusive with `ES_HOST` |
 | `SEARCH_MODES` | `hybrid,lexical,semantic` | Modes `search` accepts. The first is the default. With `ES_HOST` and no `EMBEDDING_MODEL`, the default is `lexical` only |
 | `MAX_TOP_K` | `50` | Upper bound for `top_k` |
+| `MAX_PREVIEW_CHARS` | `1000` | Per-hit `preview` length, whatever the retriever supplies |
 | `MAX_CONTENT_CHARS` | `4000` | Per-hit `content` length with `include_content=true` |
 | `MAX_DOCUMENT_CHARS` | `20000` | Slice length of `get_document`, and per-page length of `get_pages` |
-| `MAX_RESPONSE_CHARS` | `60000` | Size cap of one `search` or `get_pages` response |
+| `MAX_RESPONSE_CHARS` | `60000` | Size cap of one response. `search` and `get_pages` drop items from the tail; `get_document` leaves out metadata |
 | `MAX_PAGES` | `20` | Pages per `get_pages` call |
 | `METADATA_DENYLIST` | none | Metadata fields removed from every result and refused as filter keys. A dotted entry such as `owner.tax_id` removes a nested field |
 | `FILTERABLE_FIELDS` | unset: any key | The only keys `filters` accepts. Set but empty: no key |
@@ -204,9 +205,11 @@ identifies the document the unit belongs to.
 | `offset` | `0` | First character of the slice |
 | `max_chars` | `MAX_DOCUMENT_CHARS` | Slice length, clamped to `[1, MAX_DOCUMENT_CHARS]` |
 
-Returns `content`, `offset`, `max_chars_applied`, `next_offset`, `total_chars`
-and `metadata`. When `next_offset` is not null, call again with that offset to
-read the rest. An unknown id is a tool error.
+Returns `content`, `offset`, `max_chars_applied`, `next_offset`, `total_chars`,
+`metadata` and `truncated`. When `next_offset` is not null, call again with
+that offset to read the rest. When the unit's metadata would push the response
+past `MAX_RESPONSE_CHARS`, the metadata is left out and `truncated` is true; the
+text is always returned. An unknown id is a tool error.
 
 ### `get_pages`
 
@@ -249,9 +252,10 @@ flow. The token is a single shared secret. For OAuth, per-user identity, rate
 limits or quotas, put a gateway in front of the server.
 
 **What clients can read.** Search hits carry a preview by default; full text
-needs `include_content=true` and is truncated. `search` and `get_pages`
-responses have a size cap; `get_document` returns at most `MAX_DOCUMENT_CHARS`
-of text plus the unit's metadata. `METADATA_DENYLIST` removes fields from
+needs `include_content=true` and is truncated. Previews are capped at
+`MAX_PREVIEW_CHARS` whatever the retriever returns. Every response stays
+within `MAX_RESPONSE_CHARS`, provided `MAX_DOCUMENT_CHARS` is below it (the
+defaults are), because `get_document` always returns the text slice. `METADATA_DENYLIST` removes fields from
 results and refuses them as filter keys, because a filter on a hidden field
 reveals its value through which hits come back. A denied field's subfields
 (such as Elasticsearch's `ssn.keyword`) and its parent object are refused as

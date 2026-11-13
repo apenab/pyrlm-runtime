@@ -75,6 +75,7 @@ class ServerConfig(BaseModel):
     search_modes: tuple[SearchMode, ...] = ALL_SEARCH_MODES
 
     max_top_k: int = Field(default=50, ge=1)
+    max_preview_chars: int = Field(default=1_000, ge=1)
     max_content_chars: int = Field(default=4_000, ge=1)
     max_document_chars: int = Field(default=20_000, ge=1)
     max_response_chars: int = Field(default=60_000, ge=1)
@@ -136,6 +137,7 @@ class ServerConfig(BaseModel):
             log_level="LOG_LEVEL",
             retriever_factory="RETRIEVER_FACTORY",
             max_top_k="MAX_TOP_K",
+            max_preview_chars="MAX_PREVIEW_CHARS",
             max_content_chars="MAX_CONTENT_CHARS",
             max_document_chars="MAX_DOCUMENT_CHARS",
             max_response_chars="MAX_RESPONSE_CHARS",

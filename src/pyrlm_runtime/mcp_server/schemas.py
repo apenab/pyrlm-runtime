@@ -52,6 +52,10 @@ class DocumentResponse(BaseModel):
     )
     total_chars: int
     metadata: dict[str, Any] = Field(default_factory=dict)
+    truncated: bool = Field(
+        default=False,
+        description="True when metadata was left out to fit the response size cap.",
+    )
 
 
 class Page(BaseModel):
