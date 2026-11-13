@@ -168,3 +168,28 @@ def test_sanitize_error_keeps_only_the_exception_type():
     assert "ConnectionError" in text
     assert "es-internal" not in text
     assert "SECRET" not in text
+
+
+def test_mounted_app_keeps_auth_and_an_open_health_route():
+    import contextlib
+
+    from starlette.applications import Starlette
+    from starlette.routing import Mount
+
+    config = ServerConfig(transport="streamable-http")
+    server = build_server(retriever=PagedRetriever(), config=config)
+    mcp_app = build_asgi_app(server, config, bearer_token="tok")
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app):
+        async with server.session_manager.run():
+            yield
+
+    app = Starlette(routes=[Mount("/rag", app=mcp_app)], lifespan=lifespan)
+    auth = {**MCP_HEADERS, "authorization": "Bearer tok"}
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        health = client.get("/rag/health")
+        anonymous = client.post("/rag/mcp", json=INITIALIZE, headers=MCP_HEADERS)
+        authorised = client.post("/rag/mcp", json=INITIALIZE, headers=auth)
+
+    assert (health.status_code, anonymous.status_code, authorised.status_code) == (200, 401, 200)
