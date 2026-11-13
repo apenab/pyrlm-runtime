@@ -86,7 +86,8 @@ uv run python examples/mcp_server_demo.py http
 
 ## Configuration
 
-Every variable has the prefix `PYRLM_MCP_`. Lists are comma-separated.
+Every variable has the prefix `PYRLM_MCP_`. Lists are comma-separated. A list
+set to an empty value is an empty list, which differs from leaving it unset.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -110,8 +111,8 @@ Every variable has the prefix `PYRLM_MCP_`. Lists are comma-separated.
 | `MAX_DOCUMENT_CHARS` | `20000` | Slice length of `get_document`, and per-page length of `get_pages` |
 | `MAX_RESPONSE_CHARS` | `60000` | Size cap of one `search` or `get_pages` response |
 | `MAX_PAGES` | `20` | Pages per `get_pages` call |
-| `METADATA_DENYLIST` | none | Metadata fields removed from every result and refused as filter keys |
-| `FILTERABLE_FIELDS` | any | When set, the only keys `filters` accepts |
+| `METADATA_DENYLIST` | none | Metadata fields removed from every result and refused as filter keys. A dotted entry such as `owner.tax_id` removes a nested field |
+| `FILTERABLE_FIELDS` | unset: any key | The only keys `filters` accepts. Set but empty: no key |
 | `BASE_FILTERS` | none | JSON object merged into every search. The server's value wins on a shared key |
 
 The server reads no other secret. The built-in retriever and the embedding
@@ -212,7 +213,7 @@ read the rest. An unknown id is a tool error.
 | Argument | Default | Meaning |
 |---|---|---|
 | `logical_doc_id` | required | `logical_doc_id` of a hit. A hit's `doc_id` finds nothing |
-| `pages` | required | Page numbers to read |
+| `pages` | required | Page numbers to read, at most `MAX_PAGES` of them |
 | `radius` | `0` | Neighbouring pages to add on each side, clamped to `[0, MAX_PAGES]` |
 
 Returns `pages` (each with `doc_id`, `page_num`, `content`,
@@ -235,19 +236,26 @@ HTTP on a loopback host (`127.0.0.1`, `::1`, `localhost`) the server accepts
 only loopback `Host` and `Origin` headers. On any other host, including
 `0.0.0.0`, `::` and hostnames, the server refuses to start unless
 `BEARER_TOKEN` is set (or `ALLOW_UNAUTHENTICATED=1`) and `ALLOWED_HOSTS` lists
-the Host values clients use. Requests with another Host get HTTP 421.
+the Host values clients use. Requests with another Host get HTTP 421. A server
+bound to loopback behind a reverse proxy is exposed too: when `ALLOWED_HOSTS`
+names a non-loopback host, the server also requires `BEARER_TOKEN` or
+`ALLOW_UNAUTHENTICATED=1`.
 
-**Bearer token.** The token is compared in constant time. A request without it
+**Bearer token.** The scheme is case-insensitive and the token is compared in
+constant time. A request without it
 gets HTTP 401 with `WWW-Authenticate: Bearer`. `/health` needs no token.
 `/.well-known/*` answers 404, so OAuth-capable clients do not start an OAuth
 flow. The token is a single shared secret. For OAuth, per-user identity, rate
 limits or quotas, put a gateway in front of the server.
 
 **What clients can read.** Search hits carry a preview by default; full text
-needs `include_content=true` and is truncated. Every response has a size cap.
-`METADATA_DENYLIST` removes fields from results and refuses them as filter
-keys, because a filter on a hidden field reveals its value through which hits
-come back. `FILTERABLE_FIELDS` narrows the filter keys further.
+needs `include_content=true` and is truncated. `search` and `get_pages`
+responses have a size cap; `get_document` returns at most `MAX_DOCUMENT_CHARS`
+of text plus the unit's metadata. `METADATA_DENYLIST` removes fields from
+results and refuses them as filter keys, because a filter on a hidden field
+reveals its value through which hits come back. A denied field's subfields
+(such as Elasticsearch's `ssn.keyword`) and its parent object are refused as
+well. `FILTERABLE_FIELDS` narrows the filter keys further.
 
 **`BASE_FILTERS` is not an access boundary.** It scopes every search, but reads
 by id (`get_document`, `get_pages`) skip it. To separate tenants, use an
@@ -273,6 +281,10 @@ process: it redirects `sys.stdout` for the whole process. The server does not
 expose `embedding_ssl_verify`, which patches `requests` for the whole process.
 
 ## Limitations
+
+- When the first hit alone exceeds `MAX_RESPONSE_CHARS`, which takes very large
+  metadata, `search` returns no hits and `truncated=true`. Raise the cap or
+  deny the large metadata fields.
 
 - `get_document` reads one indexed unit. It does not stitch a whole logical
   document; read those with `get_pages`.

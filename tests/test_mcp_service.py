@@ -191,3 +191,52 @@ class TestGetPages:
         assert service.supports_pages is False
         with pytest.raises(InvalidRequest):
             service.get_pages("a", pages=[1])
+
+
+class TestDenylistReach:
+    def test_subfield_and_parent_of_a_denied_field_are_rejected_as_filters(self):
+        service = _service(metadata_denylist=("ssn", "owner.tax_id"))
+
+        for key in ("ssn.keyword", "owner"):
+            with pytest.raises(InvalidRequest, match="not allowed"):
+                service.search("revenue", filters={key: {"prefix": "1"}})
+
+    def test_dotted_entry_removes_nested_metadata_everywhere(self):
+        docs = [
+            {
+                "doc_id": "x-p1",
+                "content": "revenue",
+                "metadata": {"doc_id": "x", "page_num": 1, "owner": {"tax_id": "9", "name": "Ann"}},
+            }
+        ]
+        retriever = PagedRetriever(docs)
+        service = _service(retriever, metadata_denylist=("owner.tax_id",))
+
+        outputs = [
+            service.search("revenue").results[0].metadata,
+            service.get_document("x-p1").metadata,
+            service.get_pages("x", pages=[1]).pages[0].metadata,
+        ]
+
+        for metadata in outputs:
+            assert metadata["owner"] == {"name": "Ann"}
+        assert retriever.search("revenue")[0]["metadata"]["owner"]["tax_id"] == "9"
+
+
+class TestGetPagesLimits:
+    def test_pages_are_truncated_and_the_response_is_capped(self):
+        docs = [
+            {"doc_id": f"d-p{n}", "content": "z" * 300, "metadata": {"doc_id": "d", "page_num": n}}
+            for n in range(1, 6)
+        ]
+        service = _service(PagedRetriever(docs), max_document_chars=100, max_response_chars=400)
+
+        response = service.get_pages("d", pages=[3], radius=2)
+
+        assert all(page.content == "z" * 100 and page.content_truncated for page in response.pages)
+        assert response.truncated is True
+        assert 0 < len(response.pages) < 5
+
+    def test_more_page_numbers_than_max_pages_is_rejected(self):
+        with pytest.raises(InvalidRequest, match="between 1 and 2"):
+            _service(max_pages=2).get_pages("a", pages=[1, 2, 3])

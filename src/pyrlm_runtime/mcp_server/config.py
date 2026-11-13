@@ -101,7 +101,9 @@ class ServerConfig(BaseModel):
     def from_env(cls, environ: Mapping[str, str] | None = None) -> ServerConfig:
         """Build the configuration from ``PYRLM_MCP_*`` variables.
 
-        Lists are comma-separated; ``BASE_FILTERS`` is a JSON object. Without
+        Lists are comma-separated, and a list set to an empty value is empty:
+        ``FILTERABLE_FIELDS=""`` allows no filter key. ``BASE_FILTERS`` is a
+        JSON object. Without
         ``SEARCH_MODES``, an Elasticsearch retriever with no
         ``EMBEDDING_MODEL`` publishes only the ``lexical`` mode.
 
@@ -259,7 +261,7 @@ class _Env:
         return {key: value for key, value in found.items() if value is not None}
 
     def items(self, name: str) -> tuple[str, ...] | None:
-        value = self.text(name)
+        value = self._environ.get(ENV_PREFIX + name)
         if value is None:
             return None
         return tuple(item.strip() for item in value.split(",") if item.strip())

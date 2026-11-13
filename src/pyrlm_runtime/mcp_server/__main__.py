@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import sys
 
@@ -29,6 +30,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     if args.env_file:
+        if not os.path.isfile(args.env_file):
+            print(f"pyrlm-mcp: env file not found: {args.env_file}", file=sys.stderr)
+            return 2
         load_dotenv(args.env_file, override=False)
 
     try:

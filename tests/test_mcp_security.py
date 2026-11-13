@@ -80,6 +80,13 @@ class TestStartupGuard:
 
         check_http_startup(config, bearer_token=None)
 
+    def test_loopback_bind_with_a_remote_allowed_host_needs_a_token(self):
+        config = ServerConfig(transport="streamable-http", allowed_hosts=("mcp.example.com",))
+
+        with pytest.raises(ConfigError, match="BEARER_TOKEN"):
+            check_http_startup(config, bearer_token=None)
+        check_http_startup(config, bearer_token="tok")
+
     def test_loopback_without_token_starts(self):
         check_http_startup(ServerConfig(transport="streamable-http"), bearer_token=None)
 
@@ -117,10 +124,11 @@ class TestBearerAuth:
         assert response.status_code == 401
         assert response.headers["www-authenticate"] == "Bearer"
 
-    def test_correct_token_reaches_the_server(self):
+    @pytest.mark.parametrize("header", ["Bearer tok", "bearer tok", "BEARER  tok", "Bearer tok "])
+    def test_correct_token_reaches_the_server(self, header):
         with _http_client(bearer_token="tok") as client:
             response = client.post(
-                "/mcp", json=INITIALIZE, headers={**MCP_HEADERS, "authorization": "Bearer tok"}
+                "/mcp", json=INITIALIZE, headers={**MCP_HEADERS, "authorization": header}
             )
 
         assert response.status_code == 200
@@ -140,6 +148,15 @@ class TestBearerAuth:
 
 
 class TestTransportSecurity:
+    def test_any_loopback_bind_address_accepts_its_own_host_header(self):
+        config = ServerConfig(transport="streamable-http", host="127.0.0.2")
+        server = build_server(retriever=PagedRetriever(), config=config)
+        app = build_asgi_app(server, config)
+        with TestClient(app, base_url="http://127.0.0.2:8000") as client:
+            response = client.post("/mcp", json=INITIALIZE, headers=MCP_HEADERS)
+
+        assert response.status_code == 200
+
     def test_unlisted_host_header_is_rejected_on_loopback(self):
         with _http_client() as client:
             response = client.post(

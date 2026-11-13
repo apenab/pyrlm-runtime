@@ -70,6 +70,9 @@ class TestFromEnv:
         with pytest.raises(ConfigError):
             ServerConfig.from_env({P + name: value})
 
+    def test_empty_filterable_fields_allows_no_filter_key(self):
+        assert ServerConfig.from_env({P + "FILTERABLE_FIELDS": ""}).filterable_fields == ()
+
     def test_elasticsearch_without_embedding_model_publishes_lexical_only(self):
         config = ServerConfig.from_env({P + "ES_HOST": "http://es:9200", P + "ES_INDEX": "docs"})
 
@@ -156,3 +159,10 @@ class TestBuildRetriever:
 
         with pytest.raises(ConfigError, match=r"pyrlm-runtime\[mcp,elasticsearch\]"):
             build_retriever(config)
+
+
+def test_cli_missing_env_file_exits_with_an_error(tmp_path, capsys):
+    from pyrlm_runtime.mcp_server.__main__ import main
+
+    assert main(["--env-file", str(tmp_path / "missing.env")]) == 2
+    assert "env file not found" in capsys.readouterr().err

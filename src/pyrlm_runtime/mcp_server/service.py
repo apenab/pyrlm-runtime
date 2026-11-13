@@ -103,7 +103,7 @@ class RetrievalService:
         self._get_pages: Callable[..., list[dict[str, Any]]] | None = (
             get_pages if callable(get_pages) else None
         )
-        self._denylist = frozenset(config.metadata_denylist)
+        self._denylist = tuple(config.metadata_denylist)
         self._filterable = (
             None if config.filterable_fields is None else frozenset(config.filterable_fields)
         )
@@ -159,17 +159,16 @@ class RetrievalService:
     ) -> PagesResponse:
         if self._get_pages is None:
             raise InvalidRequest("this retriever does not support get_pages")
-        if not pages:
-            raise InvalidRequest("pages must list at least one page number")
         max_pages = self._config.max_pages
+        if not pages or len(pages) > max_pages:
+            raise InvalidRequest(f"pages must list between 1 and {max_pages} page numbers")
         radius_applied = max(0, min(radius, max_pages))
         raw_pages = self._get_pages(
             logical_doc_id, pages=list(pages), radius=radius_applied, max_pages=max_pages
         )
         if not raw_pages:
             raise NotFound(
-                f"no pages found for logical_doc_id {logical_doc_id!r} and pages {list(pages)}. "
-                "Pass the logical_doc_id of a search hit, not its doc_id."
+                f"no pages found for logical_doc_id {logical_doc_id!r}. Pass the logical_doc_id of a search hit, not its doc_id."
             )
         per_page = self._config.max_document_chars
         converted = [self._to_page(raw, per_page) for raw in raw_pages[:max_pages]]
@@ -195,7 +194,7 @@ class RetrievalService:
 
     def _check_filters(self, filters: dict[str, Any] | None) -> None:
         for key in filters or {}:
-            if key in self._denylist or (
+            if _touches_denied_field(key, self._denylist) or (
                 self._filterable is not None and key not in self._filterable
             ):
                 allowed = (
@@ -217,8 +216,7 @@ class RetrievalService:
         return raw
 
     def _metadata(self, raw: dict[str, Any]) -> dict[str, Any]:
-        metadata = raw.get("metadata") or {}
-        return {key: value for key, value in metadata.items() if key not in self._denylist}
+        return _without_paths(raw.get("metadata") or {}, self._denylist)
 
     def _to_hit(self, raw: dict[str, Any], include_content: bool) -> SearchHit:
         text = str(raw.get("content") or "")
@@ -249,6 +247,31 @@ class RetrievalService:
             content_truncated=content_truncated,
             metadata=self._metadata(raw),
         )
+
+
+def _touches_denied_field(key: str, denylist: Sequence[str]) -> bool:
+    """True when ``key`` is a denied field, one of its subfields, or a parent of one.
+
+    Subfields matter because Elasticsearch indexes ``field.keyword`` alongside
+    ``field``: filtering on it reveals the denied value just the same.
+    """
+    return any(
+        key == denied or key.startswith(denied + ".") or denied.startswith(key + ".")
+        for denied in denylist
+    )
+
+
+def _without_paths(metadata: dict[str, Any], paths: Sequence[str]) -> dict[str, Any]:
+    """Copy ``metadata`` without the dotted ``paths``, descending into nested dicts."""
+    kept: dict[str, Any] = {}
+    for key, value in metadata.items():
+        if key in paths:
+            continue
+        nested = [path[len(key) + 1 :] for path in paths if path.startswith(key + ".")]
+        if nested and isinstance(value, dict):
+            value = _without_paths(value, nested)
+        kept[key] = value
+    return kept
 
 
 def _truncate(text: str, limit: int) -> tuple[str, bool]:

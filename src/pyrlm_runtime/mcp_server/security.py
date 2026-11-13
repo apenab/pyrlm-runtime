@@ -45,6 +45,12 @@ def is_loopback(host: str) -> bool:
         return False
 
 
+def _host_part(allowed_host: str) -> str:
+    if allowed_host.startswith("["):
+        return allowed_host[1:].partition("]")[0]
+    return allowed_host.partition(":")[0]
+
+
 def check_http_startup(config: ServerConfig, bearer_token: str | None) -> None:
     """Refuse to serve HTTP on a non-loopback host without auth or a Host allowlist.
 
@@ -52,15 +58,21 @@ def check_http_startup(config: ServerConfig, bearer_token: str | None) -> None:
         ConfigError: the host is not loopback and either no bearer token is set
             (unless ``allow_unauthenticated``) or ``allowed_hosts`` is empty.
     """
-    if is_loopback(config.host):
+    remote_names = [name for name in config.allowed_hosts if not is_loopback(_host_part(name))]
+    if is_loopback(config.host) and not remote_names:
         return
     if not bearer_token and not config.allow_unauthenticated:
+        exposure = (
+            f"non-loopback host {config.host!r}"
+            if not is_loopback(config.host)
+            else f"allowed hosts {', '.join(remote_names)} (a reverse proxy can reach it)"
+        )
         raise ConfigError(
-            f"refusing to serve on non-loopback host {config.host!r} without "
+            f"refusing to serve on {exposure} without "
             "PYRLM_MCP_BEARER_TOKEN; set PYRLM_MCP_ALLOW_UNAUTHENTICATED=1 if a gateway "
             "in front of the server authenticates clients"
         )
-    if not config.allowed_hosts:
+    if not is_loopback(config.host) and not config.allowed_hosts:
         raise ConfigError(
             f"PYRLM_MCP_ALLOWED_HOSTS is required on non-loopback host {config.host!r}: "
             "list the Host header values clients use, such as mcp.example.com or "
@@ -77,8 +89,9 @@ def transport_security(config: ServerConfig) -> TransportSecuritySettings:
     hosts = list(config.allowed_hosts)
     origins = list(config.allowed_origins)
     if is_loopback(config.host):
-        hosts += _LOOPBACK_HOSTS
-        origins += _LOOPBACK_ORIGINS
+        bound = f"[{config.host}]" if ":" in config.host and "[" not in config.host else config.host
+        hosts += [*_LOOPBACK_HOSTS, f"{bound}:*"]
+        origins += [*_LOOPBACK_ORIGINS, f"http://{bound}:*"]
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True, allowed_hosts=hosts, allowed_origins=origins
     )
@@ -96,7 +109,7 @@ class BearerAuthMiddleware:
         if not token:
             raise ValueError("token must not be empty")
         self._app = app
-        self._expected = f"Bearer {token}".encode()
+        self._token = token.encode()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "lifespan":
@@ -115,8 +128,9 @@ class BearerAuthMiddleware:
         if path.startswith("/.well-known/"):
             await _reply(send, 404, {"error": "not_found"})
             return
-        supplied = dict(scope.get("headers") or []).get(b"authorization", b"")
-        if not hmac.compare_digest(supplied, self._expected):
+        header = dict(scope.get("headers") or []).get(b"authorization", b"")
+        scheme, _, supplied = header.strip().partition(b" ")
+        if scheme.lower() != b"bearer" or not hmac.compare_digest(supplied.strip(), self._token):
             await _reply(send, 401, {"error": "unauthorized"}, ((b"www-authenticate", b"Bearer"),))
             return
         await self._app(scope, receive, send)
