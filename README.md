@@ -422,6 +422,14 @@ to restore the previous gRPC transport. The transport is configured via
 `vertexai.init`, which is **process-global SDK state**: do not mix transports
 across multiple adapters in the same process — the last `init` wins.
 
+`timeout` (default `600` seconds) is a per-call deadline that holds on any
+thread, so calls made from worker threads (for example an MCP server's) cannot
+hang forever. The adapter passes it to the transport: gRPC applies it end to
+end; REST applies it as a connect timeout plus a per-read inactivity timeout, so
+a response that keeps sending bytes can take longer. On the Unix main thread a
+SIGALRM guard also enforces it end to end. A timed-out call is retried like
+other transient errors, up to `max_retries` attempts.
+
 The adapter normalizes Gemini's finish reasons to the loop's vocabulary
 (`MAX_TOKENS` → `"length"`, `STOP` → `"stop"`) in `ModelResponse.meta`, skips
 thinking parts when extracting the answer text, and folds `thoughts_token_count`

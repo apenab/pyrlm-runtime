@@ -9,6 +9,8 @@ from .env import ExecResult, _snapshot_user_state
 # Primitive types that Monty can handle directly as inputs.
 _MONTY_PRIMITIVES = (str, int, float, bool, type(None))
 
+_CAPTURE_VAR = "__pyrlm_capture__"
+
 
 def _is_monty_serializable(value: Any) -> bool:
     """Check if a value can be passed directly as a Monty input."""
@@ -249,11 +251,18 @@ class MontyREPL:
         return ExecResult(stdout=self._truncate("".join(stdout_parts)), error=None)
 
     def _augment_code(self, code: str, assigned: list[str]) -> str:
-        """Append a capture dict expression to extract assigned variable values."""
         if not assigned:
             return code
-        capture_expr = "{" + ", ".join(f'"{n}": {n}' for n in assigned) + "}"
-        return code.rstrip() + "\n" + capture_expr
+        lines = [code.rstrip(), f"{_CAPTURE_VAR} = {{}}"]
+        for n in assigned:
+            lines += [
+                "try:",
+                f'    {_CAPTURE_VAR}["{n}"] = {n}',
+                "except NameError:",
+                "    pass",
+            ]
+        lines.append(_CAPTURE_VAR)
+        return "\n".join(lines)
 
     def _run_monty(self, code: str, print_callback: Callable) -> Any:
         """Create a Monty instance and execute the code."""

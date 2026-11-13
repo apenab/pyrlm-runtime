@@ -26,6 +26,7 @@ Example:
 
 from __future__ import annotations
 
+import functools
 import logging
 import signal
 import threading
@@ -51,7 +52,7 @@ class VertexAIAdapter:
         project_id: GCP project ID
         location: GCP region (default: "us-central1")
         model: Gemini model name (default: "gemini-2.5-pro")
-        timeout: Request timeout in seconds
+        timeout: Per-call deadline in seconds, on any thread
         max_retries: Maximum number of retry attempts for transient errors
         api_transport: SDK transport, "rest" (default) or "grpc"
     """
@@ -72,7 +73,12 @@ class VertexAIAdapter:
             project_id: GCP project ID
             location: GCP region for Vertex AI
             model: Gemini model identifier
-            timeout: Request timeout in seconds
+            timeout: Per-call deadline in seconds, on any thread. It is passed to
+                the transport: gRPC treats it as an end-to-end deadline, REST as a
+                connect timeout plus a per-read inactivity timeout, so a REST
+                response that keeps streaming bytes can run longer. On the Unix
+                main thread a SIGALRM guard also enforces it end to end.
+                ``None`` or ``<= 0`` disables both.
             max_retries: Max retry attempts for 429/503/504 errors
             api_transport: SDK transport to use. ``"rest"`` (the default) uses
                 HTTP/REST, which honors ``HTTPS_PROXY`` and the system CA bundle
@@ -108,8 +114,30 @@ class VertexAIAdapter:
 
     def _init_model(self):
         """Initialize or reinitialize the Gemini model instance."""
-        self.model = GenerativeModel(self.model_name)
+        model = GenerativeModel(self.model_name)
+        if self.timeout is not None and self.timeout > 0:
+            self._bind_transport_timeout(model)
+        # Assigned after the bind: another thread may call the model as soon as it is visible.
+        self.model = model
         self.logger.debug(f"Created GenerativeModel instance: {self.model_name}")
+
+    def _bind_transport_timeout(self, model: Any) -> None:
+        """``GenerativeModel.generate_content`` calls the GAPIC client without a
+        timeout and offers no way to pass one, so the request has no deadline.
+        ``_prediction_client`` is a private SDK attribute, so its absence degrades
+        to a warning.
+        """
+        try:
+            client = model._prediction_client
+            client.generate_content = functools.partial(
+                client.generate_content, timeout=self.timeout
+            )
+        except AttributeError:
+            self.logger.warning(
+                "VertexAI SDK has no GenerativeModel._prediction_client; the %ss timeout "
+                "applies only on the main thread, and calls from other threads may hang.",
+                self.timeout,
+            )
 
     @contextmanager
     def _call_timeout_guard(self) -> Iterator[None]:
@@ -119,14 +147,10 @@ class VertexAIAdapter:
         ``poll()`` syscall. The motivation is real: long-running bench loops
         on Vertex regularly deadlock inside gRPC's pollset_work waiting on a
         condition that never arrives, with the main thread blocked in
-        ``poll()`` indefinitely. The SDK provides no per-call timeout, so we
-        impose one here.
+        ``poll()`` indefinitely.
 
-        No-op when not on Unix main thread (signals can't be delivered);
-        the call may still hang there, but that's the same behavior as
-        before this change. Most importantly, the bench (RLM main loop)
-        runs on the main thread on macOS/Linux, which is exactly where the
-        deadlock was observed.
+        No-op when not on the Unix main thread, where signals cannot be
+        delivered.
         """
         t = self.timeout
         can_alarm = (
@@ -201,12 +225,6 @@ class VertexAIAdapter:
             try:
                 start_time = time.time()
 
-                # Wall-clock guard around generate_content: the vertexai SDK
-                # does not surface a per-call timeout, and its underlying gRPC
-                # pollset can deadlock on stale connections. Without this guard
-                # the loop hangs in poll() indefinitely. The guard re-inits the
-                # model on timeout so subsequent calls start from a clean
-                # client.
                 with self._call_timeout_guard():
                     response = self.model.generate_content(
                         contents,

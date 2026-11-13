@@ -663,6 +663,41 @@ class TestElasticsearchRetrieverErrors:
                 retriever._client = None
                 retriever._get_client()
 
+    def test_concurrent_first_calls_build_one_client(self) -> None:
+        import threading
+        import types
+        from concurrent.futures import ThreadPoolExecutor
+
+        n_threads = 8
+        constructed: list[object] = []
+        every_thread_constructing = threading.Barrier(n_threads, timeout=0.5)
+
+        class _FakeES:
+            def __init__(self, **kwargs) -> None:
+                constructed.append(self)
+                try:
+                    every_thread_constructing.wait()
+                except threading.BrokenBarrierError:
+                    pass
+
+            def search(self, **kwargs) -> dict:
+                return _mock_search_response()
+
+        retriever = _make_es_retriever()
+        start = threading.Barrier(n_threads)
+
+        def worker() -> None:
+            start.wait()
+            retriever.search("q")
+
+        fake_module = types.SimpleNamespace(Elasticsearch=_FakeES)
+        with patch.dict("sys.modules", {"elasticsearch": fake_module}):
+            with ThreadPoolExecutor(max_workers=n_threads) as pool:
+                for future in [pool.submit(worker) for _ in range(n_threads)]:
+                    future.result()
+
+        assert len(constructed) == 1
+
     def test_vector_search_without_embedding_model(self) -> None:
         retriever = ElasticsearchRetriever(
             host="https://localhost:9200",

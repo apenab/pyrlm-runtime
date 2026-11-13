@@ -175,6 +175,27 @@ class TestMontyREPLVariableCapture:
         assert repl.get("a") == 100
         assert repl.get("b") == 200
 
+    def test_empty_for_loop_keeps_other_captures(self):
+        repl = MontyREPL()
+        result = repl.exec("total = 0\nfor x in []:\n    total += 1\nprint('ran')")
+        assert result.error is None
+        assert result.stdout == "ran\n"
+        assert repl.get("total") == 0
+        assert "x" not in repl.snapshot_state()
+
+    def test_for_loop_target_captured_when_loop_runs(self):
+        repl = MontyREPL()
+        result = repl.exec("for x in [1, 2, 3]:\n    pass")
+        assert result.error is None
+        assert repl.get("x") == 3
+
+    def test_bare_annotation_keeps_other_captures(self):
+        repl = MontyREPL()
+        result = repl.exec("y: int\nz = 1")
+        assert result.error is None
+        assert repl.get("z") == 1
+        assert "y" not in repl.snapshot_state()
+
 
 class TestMontyREPLExternalFunctions:
     def test_callable_as_external_fn(self):
