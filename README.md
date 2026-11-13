@@ -33,6 +33,7 @@ RLMs solve the long-context problem: instead of sending huge contexts directly t
 - [REPL Backends](#repl-backends)
 - [REPL Functions Available to the LLM](#repl-functions-available-to-the-llm)
 - [Retrieval Integration](#retrieval-integration)
+- [MCP Server](#mcp-server)
 - [Extending the REPL](#extending-the-repl)
 - [Parallel Subcalls](#parallel-subcalls)
 - [Multi-Turn Conversation History](#multi-turn-conversation-history)
@@ -64,6 +65,12 @@ pip install "pyrlm-runtime[rich]"
 ```
 
 **Requirements:** Python 3.12+
+
+To serve retrieval to MCP clients (see [MCP Server](#mcp-server)):
+
+```bash
+pip install "pyrlm-runtime[mcp]"
+```
 
 **Optional:** For the secure Monty REPL backend (Rust sandbox):
 
@@ -892,6 +899,40 @@ es_get(doc_id)                                    # Fetch full document
 ```
 
 The retrieval layer is **backend-agnostic**: any object implementing the `RetrieverProtocol` (with `search`, `vector_search`, `hybrid_search`, `get` methods) works as a drop-in backend.
+
+## MCP Server
+
+`pyrlm_runtime.mcp_server` publishes your retriever as tools of an
+[MCP](https://modelcontextprotocol.io) server, so Claude Code, Claude Desktop,
+Cursor, kagent or any other MCP client can search and read your index without
+writing Python. The tools are read-only and call no LLM:
+
+- `search(query, mode=None, top_k=10, filters=None, include_content=False)`
+  returns ranked hits with a short preview. `mode` is `hybrid`, `lexical` or
+  `semantic`.
+- `get_document(doc_id, offset=0, max_chars=None)` reads one hit in slices.
+- `get_pages(logical_doc_id, pages, radius=0)` reads pages of one document. It
+  is published only when the retriever has a `get_pages` method.
+
+```bash
+pip install "pyrlm-runtime[mcp,elasticsearch]"
+PYRLM_MCP_ES_HOST=https://my-cluster:9200 PYRLM_MCP_ES_INDEX=docs pyrlm-mcp
+```
+
+The default transport is stdio. Streamable HTTP is opt-in with
+`PYRLM_MCP_TRANSPORT=streamable-http`, and a non-loopback host needs a bearer
+token and a Host allowlist. A custom retriever plugs in with
+`PYRLM_MCP_RETRIEVER_FACTORY=pkg.module:callable`, or in Python:
+
+```python
+from pyrlm_runtime.mcp_server import ServerConfig, build_server, run_server
+
+config = ServerConfig()
+run_server(build_server(retriever=my_retriever, config=config), config)
+```
+
+Configuration, tool arguments, limits and security notes:
+**[docs/MCP.md](docs/MCP.md)**.
 
 ## Extending the REPL
 

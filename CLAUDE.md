@@ -29,6 +29,15 @@ src/pyrlm_runtime/
   router.py       # Router for model selection
   retrieval.py    # ElasticsearchRetriever: hybrid search, page-aware ops, RRF
   adapters/       # LLM adapters (base, openai_compat, generic_chat, fake)
+  mcp_server/     # Optional MCP server (extra "mcp"): retrieval as MCP tools
+    config.py     # ServerConfig (JSON, no secrets), Secrets, from_env, build_retriever
+    schemas.py    # Tool output models: the client contract
+    service.py    # RetrievalService, ScopedRetriever; never imports mcp
+    server.py     # build_server: capability matrix, tool registration
+    security.py   # build_asgi_app, run_server, start-up guard, bearer middleware
+    stdio.py      # claim_stdio: protocol on private fds, fd 1 -> stderr
+    prompts.py    # Tool descriptions and server instructions
+    __main__.py   # pyrlm-mcp CLI
   doctools/
     tools.py      # Six doc tools: list_pdfs, get_pdf_info, read_pdf_pages,
                   #   extract_table, search_in_pdf, search_corpus
@@ -53,6 +62,7 @@ tests/
 - Framework: **pytest**
 - Tests that require `pydantic-monty`: use `@pytest.mark.skipif(not MONTY_AVAILABLE, ...)`
 - Use `FakeAdapter` (from `pyrlm_runtime.adapters`) for RLM integration tests
+- Tests that require the `mcp` extra: `pytest.importorskip("mcp")` at module top; the dev group installs it
 
 ### Regression tests rule
 
@@ -81,6 +91,23 @@ Two interchangeable backends via `REPLProtocol`:
 - `"monty"`: MontyREPL using pydantic-monty (Rust interpreter, secure)
 
 Both expose: `exec(code) -> ExecResult`, `get(name)`, `set(name, value)`
+
+## MCP server
+
+`src/pyrlm_runtime/mcp_server/` is an optional MCP server behind the `mcp`
+extra (`pip install "pyrlm-runtime[mcp]"`). Rules:
+
+- It imports only the public API of `pyrlm_runtime`, like an external consumer.
+- `service.py` holds the logic and never imports `mcp`; `server.py` is the thin
+  MCP adapter.
+- Tools are published by capability through the table in `server.py`.
+- Importing `pyrlm_runtime` must not import `mcp` (`tests/test_mcp_imports.py`).
+- On stdio, stdout is the protocol channel: `claim_stdio()` (in `stdio.py`)
+  moves the protocol to private descriptors and points fd 1 at stderr before
+  any user code runs. Log to stderr and never run a `PythonREPL` in the server
+  process.
+
+Design: `docs/MCP-SERVER-RFC.md`. User guide: `docs/MCP.md`.
 
 ## Key patterns
 
