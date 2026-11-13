@@ -114,19 +114,21 @@ class VertexAIAdapter:
 
     def _init_model(self):
         """Initialize or reinitialize the Gemini model instance."""
-        self.model = GenerativeModel(self.model_name)
-        self.logger.debug(f"Created GenerativeModel instance: {self.model_name}")
+        model = GenerativeModel(self.model_name)
         if self.timeout is not None and self.timeout > 0:
-            self._bind_transport_timeout()
+            self._bind_transport_timeout(model)
+        # Assigned after the bind: another thread may call the model as soon as it is visible.
+        self.model = model
+        self.logger.debug(f"Created GenerativeModel instance: {self.model_name}")
 
-    def _bind_transport_timeout(self) -> None:
+    def _bind_transport_timeout(self, model: Any) -> None:
         """``GenerativeModel.generate_content`` calls the GAPIC client without a
         timeout and offers no way to pass one, so the request has no deadline.
         ``_prediction_client`` is a private SDK attribute, so its absence degrades
         to a warning.
         """
         try:
-            client = self.model._prediction_client
+            client = model._prediction_client
             client.generate_content = functools.partial(
                 client.generate_content, timeout=self.timeout
             )
