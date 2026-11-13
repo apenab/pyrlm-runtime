@@ -165,3 +165,14 @@ def test_rewriter_thread_safety():
 
     assert not errors
     assert rw.calls == 10
+
+
+def test_rewriter_adapter_failure_returns_empty_and_warns(caplog):
+    class _FailingAdapter:
+        def complete(self, messages, **kwargs):
+            raise RuntimeError("provider 503")
+
+    rw = QueryRewriter(_FailingAdapter(), n=3, system_prompt=SYSTEM_PROMPT)
+    with caplog.at_level("WARNING", logger="pyrlm_runtime.multiquery"):
+        assert rw.rewrite("q") == []
+    assert "provider 503" in caplog.text
