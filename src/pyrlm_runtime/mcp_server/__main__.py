@@ -18,8 +18,6 @@ from pyrlm_runtime.mcp_server import (
     run_server,
 )
 
-logger = logging.getLogger("pyrlm_runtime.mcp_server")
-
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
@@ -48,7 +46,6 @@ def main(argv: list[str] | None = None) -> int:
         secrets = Secrets.from_env()
         retriever = build_retriever(config, secrets)
         server = build_server(retriever=retriever, config=config)
-        logger.info("serving over %s", config.transport)
         run_server(server, config, bearer_token=secrets.bearer_token)
     except ConfigError as exc:
         print(f"pyrlm-mcp: {exc}", file=sys.stderr)
